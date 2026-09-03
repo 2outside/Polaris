@@ -1,0 +1,23 @@
+[package]
+name = "polaris-system-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+polaris-config-engine = { path = "../config-engine" }
+polaris-helper-proto = { path = "../helper-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+# 唯一用途：mac 服务枚举回落到旧口径时自曝（静默降级一道安全相关的过滤 = 本仓吃过亏的形状）。
+log = "0.4"
+plist = "1"
+
+[dev-dependencies]
+# 源码级门的单点取材实现（`module_source!` = 模块根 + `<模块>/**` 递归、排除 `tests/`）。
+# 手写 `read_to_string(env!("CARGO_MANIFEST_DIR") + 文件名)` 的形态只认单个文件，
+# 生产码一拆进子模块取材面就塌一半，建在上面的否定型断言随之恒真。
+polaris-source-probe = { version = "1.0.0", path = "../source-probe" }
+tempfile = "3"

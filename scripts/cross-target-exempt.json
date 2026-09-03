@@ -1,0 +1,10 @@
+{
+  "polaris": {
+    "targets": ["x86_64-pc-windows-msvc", "x86_64-apple-darwin"],
+    "why": "Tauri 的 macOS 后端与 Windows 资源编译都要宿主没有的工具链，而 cargo check / clippy 同样会跑 build script。darwin 侧挡路的是 objc2-exception-helper（链路 objc2 <- block2 <- dispatch2 <- {rfd <- tauri-plugin-dialog, tao <- tauri-runtime-wry} <- polaris），它的 cc-rs 调用要 Apple clang（宿主 gcc 不认 -arch / -mmacosx-version-min）；msvc 侧首个挡路的是 polaris 自己 build.rs 里的 tauri-winres，要 llvm-rc。注意 x86_64-pc-windows-gnu 不在此列：宿主有 mingw-w64，polaris 在该 target 上是能过的，且它覆盖同一套 cfg(windows) 分支。"
+  },
+  "polaris-unlock-transport": {
+    "targets": ["x86_64-pc-windows-msvc", "x86_64-apple-darwin"],
+    "why": "wreq 的依赖链带两个 C 组件：async-compression -> zstd-sys（darwin 需要认 -arch / -mmacosx-version-min 的 Apple clang），tokio-btls -> btls-sys/BoringSSL（msvc 的 build script 自报 'GNU compiler is not supported for this target'）。本 crate 的 Cargo.toml 自述它是 workspace 里唯一允许依赖 wreq 的地方，这条豁免与那条约束是同一件事的两面。"
+  }
+}

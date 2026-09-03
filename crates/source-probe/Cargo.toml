@@ -1,0 +1,12 @@
+[package]
+name = "polaris-source-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# 依赖恒为空：本 crate 只用 std（`fs` / `path`）。任何第三方依赖都会经 `[dev-dependencies]`
+# 反向渗进 src-tauri 与 5 个 domain crate 的测试构建图，而它的全部职责只是「按锚点读文件」。

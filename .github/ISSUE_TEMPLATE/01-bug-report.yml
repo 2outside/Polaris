@@ -1,0 +1,98 @@
+name: Bug Report / Bug 反馈
+description: Report reproducible incorrect behavior / 报告可复现的异常行为
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before submitting. Remove subscription URLs, credentials, tokens, and other sensitive data from all text, screenshots, and logs.
+
+        提交前请搜索现有 Issue。请从文字、截图和日志中移除订阅地址、凭据、令牌及其他敏感信息。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area / 影响范围
+      options:
+        - Connection, proxy, or TUN / 连接、代理或 TUN
+        - Subscription or node management / 订阅或节点管理
+        - Rules or DNS / 规则或 DNS
+        - Application or core update / 应用或内核更新
+        - Installation, startup, or uninstall / 安装、启动或卸载
+        - Interface or localization / 界面或本地化
+        - Performance or resource usage / 性能或资源占用
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Polaris version / Polaris 版本
+      placeholder: "For example / 例如：1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system / 操作系统
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: input
+    id: system-version
+    attributes:
+      label: System version and architecture / 系统版本与架构
+      placeholder: "For example / 例如：macOS 15.6 arm64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Actual behavior / 实际表现
+      description: Describe what happened, including visible error messages. / 描述实际发生的情况，包括可见错误信息。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期表现
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Logs and additional context / 日志与补充信息
+      description: Attach sanitized logs, screenshots, or a diagnostic export when relevant. / 如有必要，请附上已脱敏的日志、截图或诊断导出。
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Submission checks / 提交确认
+      options:
+        - label: I searched existing issues and found no duplicate. / 我已搜索现有 Issue，未发现重复问题。
+          required: true
+        - label: I removed all subscription URLs, credentials, tokens, and other sensitive data. / 我已移除全部订阅地址、凭据、令牌及其他敏感信息。
+          required: true

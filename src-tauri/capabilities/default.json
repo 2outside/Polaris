@@ -1,0 +1,30 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Polaris 主窗口的最小 renderer 能力集。自定义 app command 由 Rust 侧边界校验；插件 ACL 只授生产 UI 真正直接调用的窗口、外链、通知与平台查询能力。**dialog 权限刻意不用 `dialog:default`**：破坏性操作统一走 App 自绘 ConfirmDialog，生产代码不再调用 window.confirm；仅保留 allow-message，以承接插件 init 对 window.alert 的覆写。文件对话框、自动启动、进程与文件系统均只在 Rust 侧使用，不向 renderer 开放。",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "core:window:allow-start-dragging",
+    "core:webview:default",
+    "core:app:default",
+    "core:path:default",
+    "core:resources:default",
+    "core:menu:default",
+    "core:tray:default",
+    "core:image:default",
+    "shell:allow-open",
+    "dialog:allow-message",
+    "notification:default",
+    "os:default"
+  ]
+}

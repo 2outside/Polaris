@@ -1,0 +1,46 @@
+# Rust
+/target
+**/target
+# Cargo.lock 入库：Polaris 是 app（非 lib），提交 lock 保证 CI/发布可复现构建。
+# 见 https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargo-lock-in-version-control-but-not-libraries
+
+# Node / 前端
+node_modules/
+ui/dist/
+dist/
+dist-package/
+*.tsbuildinfo
+
+# 下载的内核 / 资源二进制（由 scripts/ 拉取，不入库）
+/resources/*
+!/resources/.gitkeep
+# geo 规则集随包入库（对齐 上游 resources/data/）：28 个 .srs ≈ 472K（= builtin_geo_rulesets()
+# 的 28 条），**目录内只有这 28 个文件**。数量以 builtin_geo_rulesets() 为准，
+# src-tauri/build.rs 的 release 打包期断言盯着它。
+# 🔴 别往这个目录里放别的东西（2026-08-29）：整个 data/ 是 tauri.conf.json 的一条
+# `bundle.resources` 条目 ⇒ 放进来的任何文件都随四个平台的安装包出货。此前躺着两个开发文档
+# （README.md / README.en.md，8 KB，正文还指向上游 Electron 路径）和一个 0 字节 .gitkeep，
+# 三件都随包分发过。文档已移到 docs/geo-rulesets*.md；.gitkeep 已删（28 个 .srs 入库 ⇒ 目录
+# 在任何 clone 里都非空，占位文件本就无事可做）。现在由
+# `scripts/verify-packaging.mjs inventory` 按白名单清点包内容，多一个文件即红。
+# 必须先放行 data/ 目录本身——`/resources/*` 直接匹配该目录，
+# 目录被忽略时其内文件无法用 `!` 重新纳入。
+# 缺失后果：runtime_rules_dir 恒空 → is_valid_srs_fn 恒 false → 全部 geo 规则被
+# fail-closed 剪枝 → 智能分流失效；叠加回国模式即全量明文直连。
+!/resources/data/
+
+# 杂项
+.DS_Store
+*.log
+.env
+*.pem
+*.p12
+
+# Tauri 生成物（generate_context 产出）
+src-tauri/gen/
+
+# codegraph 索引（本地导航用）
+.codegraph/
+
+# agent worktree 宿主目录（Claude Code 并行子代理用，纯本地、不入库）
+.claude/worktrees/

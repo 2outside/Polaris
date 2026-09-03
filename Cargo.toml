@@ -1,0 +1,45 @@
+# Polaris — Cargo workspace
+# crate 边界 / 职责见 ~/docs/polaris/design/polaris-system-design.md §B.2
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Outsider"]
+repository = "https://github.com/2outside/Polaris"
+
+# 集中声明：serde/serde_json 是 Rust JSON 序列化事实标准（无 stdlib 替代），config-engine 核心职责即产/消费
+# sing-box JSON config（sing-box check 输入）；src-tauri 主进程已用（既有依赖，非新增第三方）。
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# regex = Rust 正则事实标准；unlock checker 需正则提取 Disney countryCode / Gemini region 码（无 stdlib 替代）。
+regex = "1"
+# async-trait = trait 中 async fn 所需（Rust 2024 前的 stable 缺省）—— unlock 的 UnlockHttp::request 异步签名。
+async-trait = "0.1"
+# futures = async 工具：unlock 并发齐射 6 checker（join_all），无依赖则需手搓 VecFuture。
+futures = "0.3"
+
+# ════════════════════════════════════════════════════════════════════════════
+# 发行构型
+# ════════════════════════════════════════════════════════════════════════════
+#
+# `strip = "symbols"`：发行二进制此前保留完整 `.symtab`（111628 个符号 / 54 MB）与 144 处
+# 构建机绝对路径（`/home/sway/Code/polaris/...`）。前者是逆向的免费地图，后者直接泄露构建环境。
+#
+# **加它之前必须先有门 2**（`src-tauri/tests/test_only_symbols_gated.rs`）：在此之前
+# `nm target/release/polaris | grep Mock` 是唯一能实测「测试替身没进二进制」的手段，strip 掉就没了。
+# 门 2 已建成，并在 2026-08-30 的发行构建上留下最后一次 nm 取证：MockFs / MockFailOp /
+# MemoryStateStore / MemoryDownload / FixedClock / SubstringSelector / VecStatusStream **各 0 处**
+# （命中的 `FakeIpConfig` 是 sing-box `dns.fakeip` 的协议概念，`DummyHash` 来自第三方 crate）。
+#
+# **不得在本段写 `debug-assertions = true`**：L1/L2 的逃生门信任级分流谓词是
+# `cfg!(any(debug_assertions, test))`，它成立的前提正是发行构型下 `debug_assertions` 为假。
+# 写了 ⇒ 信任级校验整条失效，不报错、不转红、不改任何测试计数。
+# 这条由 `src-tauri/tests/release_escape_hatches.rs::release_profiles_must_not_enable_debug_assertions`
+# 强制，不是靠本注释自觉。
+[profile.release]
+strip = "symbols"

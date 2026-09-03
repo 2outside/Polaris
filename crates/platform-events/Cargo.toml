@@ -1,0 +1,18 @@
+[package]
+name = "polaris-platform-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# `Platform`：`monitor_line_impact` 的平台判别入参。helper-proto 的 [dependencies] 段为空，
+# 零传递依赖。
+polaris-helper-proto = { path = "../helper-proto" }
+# `dns_route_events::{classify_route_monitor_line, RouteMonitorEvent}`：macOS route monitor
+# 行分类的唯一真值。原样搬运的前提就是继续用它 —— 换成「结果作参数传入」是行为面改写，
+# 会让「搬前搬后逐字一致」这条最强证据失效。
+polaris-system-integration = { path = "../system-integration" }

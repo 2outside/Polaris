@@ -1,0 +1,26 @@
+[package]
+name = "polaris-net-stack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+polaris-config-engine = { path = "../config-engine" }
+url = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+# 正则（provider filter/exclude-filter）。regex crate 引擎天然线性时间（防 ReDoS）。
+regex = "1"
+# provider 正文并发拉取；解析与 ID 分配仍按声明序执行，避免为了并发引入共享可变生成器。
+futures = { workspace = true }
+# absolute network deadline（覆盖 DNS guard / redirect / headers / terminal body）与
+# provider cancellation notification。Tokio 已在 workspace 依赖图中，不引入新第三方。
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+polaris-source-probe = { version = "1.0.0", path = "../source-probe" }
+# 测试用：生成 ServerConfig.id（对齐 Polaris crypto.randomUUID()）。
+# 测试用：异步运行时（assert_host_allowed / safe_redirect_fetch 的 tokio::test）。
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

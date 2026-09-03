@@ -1,0 +1,192 @@
+name: Release Risk
+
+# 合入前与 main 集成态的发布风险门：workflow 永远触发，路径分类发生在 job 内。
+# 这样把最终 `release risk gate` 设为 required check 时，无关改动也会快速成功，
+# 不会因 workflow 级 paths 过滤而永久 Pending。
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-risk-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+
+jobs:
+  classify:
+    name: classify release impact
+    runs-on: ubuntu-22.04
+    outputs:
+      kernel: ${{ steps.impact.outputs.kernel }}
+      platforms: ${{ steps.impact.outputs.platforms }}
+      preflight: ${{ steps.impact.outputs.preflight }}
+      has_package: ${{ steps.impact.outputs.has_package }}
+      unregistered: ${{ steps.impact.outputs.unregistered }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+
+      - name: Test release impact classifier
+        # 走 gate-node-test.sh 而不是直接 `node --test`：后者指向空目录/文件被移走/错误
+        # cwd 时是 rc=0 静默判绿（scripts/gate-node-test.sh 顶部注释有实测）；本机全量门单
+        # （vault SoT §12.3c）调用的是同一份脚本，两处判据共用一份实现，不各自漂移。
+        run: bash scripts/gate-node-test.sh
+
+      - name: Classify changed paths
+        id: impact
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BASE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD" ;;
+            merge_group) base="$MERGE_BASE"; head="$MERGE_HEAD" ;;
+            push) base="$PUSH_BASE"; head="$PUSH_HEAD" ;;
+            *) echo "::error::未登记的事件：$EVENT_NAME"; exit 1 ;;
+          esac
+
+          result="$RUNNER_TEMP/release-impact.json"
+          if [ -n "$base" ] && [ -n "$head" ] \
+            && git cat-file -e "${base}^{commit}" 2>/dev/null \
+            && git cat-file -e "${head}^{commit}" 2>/dev/null; then
+            git diff --name-only -z "$base" "$head" | node scripts/classify-ci-impact.mjs > "$result"
+          else
+            echo "无法取得可靠 diff，故障关闭为内核门 + 四平台。"
+            node scripts/classify-ci-impact.mjs --full > "$result"
+          fi
+
+          jq . "$result"
+          {
+            echo "kernel=$(jq -r '.kernel' "$result")"
+            echo "platforms=$(jq -c '.platforms' "$result")"
+            echo "preflight=$(jq -r '.preflight' "$result")"
+            echo "has_package=$(jq -r '.hasPackage' "$result")"
+            echo "unregistered=$(jq -r '.unregisteredScopes | join(" ")' "$result")"
+          } >> "$GITHUB_OUTPUT"
+
+  preflight:
+    name: static packaging + bundled core gate
+    needs: classify
+    if: needs.classify.outputs.preflight == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+
+      - name: Fetch sing-box core
+        run: node scripts/fetch-core.mjs
+
+      - name: Fetch packaging resources
+        if: needs.classify.outputs.has_package == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/fetch-dashboard.mjs
+          mkdir -p resources/data
+
+      - name: Verify packaging conf invariants
+        if: needs.classify.outputs.has_package == 'true'
+        run: node scripts/verify-packaging.mjs confs
+
+      - name: Install Rust stable for bundled-core gates
+        if: needs.classify.outputs.kernel == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc -Vv
+
+      # release-risk 的真核门只在 Ubuntu 跑：只需 Linux SO；两个 go.mod 依赖仍由脚本交叉校验。
+      - name: Fetch cronet library (Linux)
+        if: needs.classify.outputs.kernel == 'true'
+        run: node scripts/fetch-cronet.mjs --platform=linux
+
+      - name: Run mandatory bundled-core gates
+        if: needs.classify.outputs.kernel == 'true'
+        env:
+          POLARIS_REQUIRE_KERNEL_GATE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p polaris-config-engine --test core_dep_fingerprint
+          cargo test -p polaris-config-engine --test core_schema_surface
+          cargo test -p polaris-config-engine --test core_build_matrix
+          cargo test -p polaris-config-engine --test kernel_accepts_outbounds
+          cargo test -p polaris-config-engine --test kernel_accepts_full_config
+
+  package:
+    name: package selected platforms
+    needs: [classify, preflight]
+    if: needs.classify.outputs.has_package == 'true' && needs.preflight.result == 'success'
+    # package.yml 内含一个仅 v* tag 才会运行的 publish job。GitHub 会在启动前校验整张复用图，
+    # 即使本次 ref 不可能发布，也要求调用 job 提供它声明的 contents: write 权限上限。
+    # 权限只给这一个复用 job；被调 workflow 的构建 job 仍由其顶层 permissions 收窄为 contents: read。
+    permissions:
+      contents: write
+    uses: ./.github/workflows/package.yml
+    with:
+      platforms: ${{ needs.classify.outputs.platforms }}
+      skip_quality_gates: true
+      run_kernel_gates: false
+      upload_artifacts: false
+    secrets: inherit
+
+  gate:
+    name: release risk gate
+    needs: [classify, preflight, package]
+    if: always()
+    runs-on: ubuntu-22.04
+    env:
+      CLASSIFY_RESULT: ${{ needs.classify.result }}
+      PREFLIGHT_REQUIRED: ${{ needs.classify.outputs.preflight }}
+      PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+      PACKAGE_REQUIRED: ${{ needs.classify.outputs.has_package }}
+      PACKAGE_RESULT: ${{ needs.package.result }}
+      UNREGISTERED: ${{ needs.classify.outputs.unregistered }}
+    steps:
+      - name: Require every selected release-risk leg
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$CLASSIFY_RESULT" = success ] || {
+            echo "::error::影响分类失败：$CLASSIFY_RESULT"; exit 1; }
+          # 未登记的影响面（落在 crates/ 或 src-tauri/ 内、两张登记表都查不到的 scope）当场红并点名。
+          # 为什么这条门开在这里，而不是只靠 ui.yml 的 vitest 完备性门：
+          #   1) 独立性 —— ui.yml 挂了、被 skip、或 required check 集合被改，那条门就没牙；
+          #      本 job 是 release risk 的 required check，且 `if: always()`，任何情况下都会执行到这一行。
+          #   2) 惩罚强度 —— 分类器对未登记 scope 已 fail-closed 成「内核门 + 四平台」，
+          #      即默认多花一次全量打包的钱，但 CI 仍是绿的，没人会去补登记。
+          #      这里把它升级成「当场红 + 点名 scope」，让补登记成为合入的前置条件。
+          [ -z "$UNREGISTERED" ] || {
+            echo "::error::未登记的影响面 scope：$UNREGISTERED"; exit 1; }
+          if [ "$PREFLIGHT_REQUIRED" = true ] && [ "$PREFLIGHT_RESULT" != success ]; then
+            echo "::error::发布预检未通过：$PREFLIGHT_RESULT"
+            exit 1
+          fi
+          if [ "$PACKAGE_REQUIRED" = true ] && [ "$PACKAGE_RESULT" != success ]; then
+            echo "::error::选中的安装包腿未全部通过：$PACKAGE_RESULT"
+            exit 1
+          fi
+          echo "发布风险门通过：preflight=$PREFLIGHT_RESULT package=$PACKAGE_RESULT"

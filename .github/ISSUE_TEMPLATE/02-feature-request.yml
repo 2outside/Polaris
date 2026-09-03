@@ -1,0 +1,65 @@
+name: Feature Request / 功能建议
+description: Propose a new capability or an improvement / 提议新功能或现有功能改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem first, then the proposed solution. Search existing issues before submitting.
+
+        请先描述需要解决的用户问题，再说明建议方案。提交前请搜索现有 Issue。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area / 相关范围
+      options:
+        - Connection, proxy, or TUN / 连接、代理或 TUN
+        - Subscription or node management / 订阅或节点管理
+        - Rules or DNS / 规则或 DNS
+        - Application or core update / 应用或内核更新
+        - Installation or platform integration / 安装或平台集成
+        - Interface or localization / 界面或本地化
+        - Performance or resource usage / 性能或资源占用
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case / 问题或使用场景
+      description: Explain the limitation or workflow that motivates this request. / 说明提出该建议的限制或使用流程。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution / 建议方案
+      description: Describe the expected behavior and interaction. / 描述预期行为与交互方式。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 已考虑的替代方案
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context / 补充信息
+      description: Add mockups, examples, or references when useful. / 可补充界面示意、示例或参考资料。
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Submission checks / 提交确认
+      options:
+        - label: I searched existing issues and found no duplicate request. / 我已搜索现有 Issue，未发现重复建议。
+          required: true
+        - label: This request describes one focused feature or improvement. / 本 Issue 只描述一个明确的功能或改进。
+          required: true

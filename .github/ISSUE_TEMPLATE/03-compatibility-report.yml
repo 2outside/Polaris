@@ -1,0 +1,89 @@
+name: Compatibility Report / 兼容性反馈
+description: Report protocol, subscription, core, or platform compatibility problems / 反馈协议、订阅、内核或平台兼容问题
+title: "[Compatibility] "
+labels:
+  - bug
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Preserve the original structure of sanitized samples. Do not post a live subscription URL, real server address, credential, or token.
+
+        脱敏样例应保留原始结构。请勿公开有效订阅地址、真实服务器地址、凭据或令牌。
+
+  - type: dropdown
+    id: compatibility-type
+    attributes:
+      label: Compatibility type / 兼容类型
+      options:
+        - Subscription format or share link / 订阅格式或分享链接
+        - Proxy protocol or transport / 代理协议或传输层
+        - sing-box core version / sing-box 内核版本
+        - Operating system or architecture / 操作系统或架构
+        - Installation package / 安装包
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Polaris version / Polaris 版本
+      placeholder: "For example / 例如：1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Include OS, system version, architecture, and relevant core or provider version. / 请包含操作系统、系统版本、架构及相关内核或服务端版本。
+      placeholder: "For example / 例如：macOS 15.6 arm64, sing-box 1.14.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: incompatible-input
+    attributes:
+      label: Sanitized incompatible sample / 脱敏后的不兼容样例
+      description: Replace private values but preserve schemes, separators, escaping, field names, and nesting. / 替换隐私值，但保留协议头、分隔符、转义、字段名及嵌套结构。
+    validations:
+      required: true
+
+  - type: textarea
+    id: comparison
+    attributes:
+      label: Compatibility comparison / 兼容性对比
+      description: State which application, format, core version, or platform accepts the same input. / 说明哪个应用、格式、内核版本或平台可处理同一输入。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Polaris behavior / Polaris 实际表现
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期表现
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs / 脱敏日志
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Submission checks / 提交确认
+      options:
+        - label: I searched existing issues and found no duplicate. / 我已搜索现有 Issue，未发现重复问题。
+          required: true
+        - label: I preserved the input structure while removing all private values. / 我在移除全部隐私值的同时保留了输入结构。
+          required: true

@@ -1,0 +1,10 @@
+packages:
+  - '.'
+
+# 新发布包先经过 24 小时观察窗；锁文件已固定的 CI/本地 frozen install 不受解析漂移影响。
+minimumReleaseAge: 1440
+
+# 6.1.1 于 2026-08-28 发布，本轮已核对 npm 元数据、完整性锁与生产构建。
+# 精确版本例外不覆盖后续发布；其余依赖继续执行 pnpm 11 的供应链策略。
+minimumReleaseAgeExclude:
+  - '@vitejs/plugin-react@6.1.1'

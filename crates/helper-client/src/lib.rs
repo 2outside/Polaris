@@ -1,0 +1,64 @@
+//! polaris-helper-client — 主进程与特权 helper 的通信客户端（§B.2）。
+//!
+//! Polaris 主进程经 `HelperManager.ts` 管理 macOS LaunchDaemon（安装/卸载/状态探测），
+//! 经 socket（mac/linux）或 named pipe（win）连 helper，发行文本协议请求驱动 sing-box 启停
+//!（`sendCommand`，`HelperManager.ts:433-457`）。helper 不可用时回退平台提权
+//!（osascript / UAC / pkexec，`PlatformPrivilegeService.ts`）。
+//!
+//! 本 crate 是 Polaris 主进程侧的等价物 —— 三件套：
+//!
+//! - [`client::HelperClient`]：连接 helper socket/pipe，发 [`Request`](polaris_helper_proto::Request)
+//!   收 [`Response`](polaris_helper_proto::Response)。复用 `polaris-helper-proto` 的 codec（零 wire drift）。
+//! - [`manager::HelperManager`]：helper 生命周期（安装路径 launchd/systemd/SCM + 状态探测 + 装卸决策）。
+//! - [`privilege::Escalation`]：提权回退纯逻辑决策（osascript / UAC / pkexec argv 构造）。
+//!
+//! ## 移植纪律
+//!
+//! 1. **socket/pipe trait 抽象**：[`transport::ConnectionStream`] + [`client::Connector`]，测试 mock
+//!    （`transport::MockStream`，测试替身），不触碰宿主。
+//! 2. **复用 helper-proto codec**：[`polaris_helper_proto::codec::encode`] + [`polaris_helper_proto::Response::parse`]，
+//!    与已部署 helper 协议强一致（wire drift 编译期消灭）。
+//! 3. **unsafe 默认禁用**：crate 根 `deny(unsafe_code)`；仅 Windows 命名管道与系统目录查询的具体
+//!    FFI item 局部放开，并逐处写明句柄、缓冲和生命周期不变量（与 helper 服务端同一规范）。
+//! 4. **不 commit git**。
+//!
+//! ## 模块布局
+//!
+//! - [`transport`]：连接字节流抽象 + mock。
+//! - [`token`]：token 行鉴权（读/写/比对 token 文件）。
+//! - [`client`]：[`client::HelperClient`]（连接 + send + 重连/超时）。
+//! - [`manager`]：[`manager::HelperManager`]（生命周期 + [`manager::SysOps`] trait）。
+//! - [`privilege`]：提权回退纯逻辑（argv 构造 + 取消判定）。
+
+#![deny(unsafe_code)]
+
+pub mod client;
+pub mod connector;
+pub mod manager;
+pub mod privilege;
+pub mod token;
+pub mod transport;
+#[cfg(windows)]
+mod windows_pipe;
+#[cfg(windows)]
+mod windows_system;
+
+// 顶层便利重导出：让 `polaris_helper_client::HelperClient` 无需钻模块路径（主进程主用类型）。
+pub use client::{ClientError, Connector, HelperClient};
+#[cfg(windows)]
+pub use connector::PipeConnector;
+#[cfg(unix)]
+pub use connector::UnixConnector;
+pub use manager::{
+    HelperManager, HelperStatus, InstallParams, InstallPaths, ManagerError, StdSysOps, SysOps,
+    READY_POLL_ATTEMPTS, READY_POLL_DELAY,
+};
+pub use privilege::{
+    classify_outcome, is_user_cancelled, osascript_escalation, pkexec_escalation, run_escalation,
+    uac_escalation, Escalation, EscalationOutcome, Executor, PrivilegeMethod, StdExecutor,
+};
+pub use token::{read_token, remove_token, write_token, write_token_content};
+pub use transport::{ConnectionStream, IoAdapter, INSTALL_CORE_TIMEOUT_MS, READ_TIMEOUT};
+// MockStream 是测试替身：只在 test / test-utils 下导出，不进生产 API 面。
+#[cfg(any(test, feature = "test-utils"))]
+pub use transport::MockStream;

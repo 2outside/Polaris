@@ -1,0 +1,27 @@
+# GitHub 自动生成 release notes 时按仓库现有标签归类。
+# 标签是唯一分类来源；未命中的已合并 PR 落入兜底，避免因标签遗漏而从更新说明消失。
+changelog:
+  exclude:
+    labels:
+      - documentation
+      - duplicate
+      - invalid
+      - question
+      - wontfix
+
+  categories:
+    - title: Accessibility
+      labels:
+        - accessibility
+
+    - title: New features
+      labels:
+        - enhancement
+
+    - title: Bug fixes
+      labels:
+        - bug
+
+    - title: Other changes
+      labels:
+        - '*'

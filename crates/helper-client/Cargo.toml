@@ -1,0 +1,42 @@
+[package]
+name = "polaris-helper-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+polaris-helper-proto = { path = "../helper-proto" }
+# 助手 token 是本地提权边界；三平台统一向 OS CSPRNG 取熵，失败必须中止而非可预测回退。
+getrandom = "0.4"
+# thiserror = ClientError / ManagerError 枚举 derive（与 helper / core-supervisor 一致）。
+thiserror = "2"
+# log = 连接 / 重连 / 装卸事件 facade（生产侧由 host 接管；测试侧 no-op）。
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# Windows 命名管道客户端必须与 helper 服务端使用同一组同步 Win32 原语；std::fs::File
+# 在真机上会把 start 响应额外拖住数秒。依赖面只覆盖句柄生命周期与文件 IO。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    # Win32_System_Pipes = PeekNamedPipe：命名管道客户端唯一的非阻塞可读量探测原语，
+    # 是 WinPipeStream::read_until_timeout 兑现 trait 超时契约的基础（同步 ReadFile 不可中断）。
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+] }
+
+[features]
+# test-utils = 把 MockStream（纯内存 ConnectionStream 替身）暴露给下游 crate 的 cfg(test)。
+# 理由同 polaris-updater/Cargo.toml 的同名 feature：`test` cfg 不跨 crate 传播。
+# 只由 src-tauri 的 [dev-dependencies] 打开；resolver = "2" 下不进 `cargo build` / 打包。
+test-utils = []
+
+[dev-dependencies]
+# tempfile = token 文件 / 脚本落盘的临时目录（token.rs / manager.rs 测试）。
+tempfile = "3"
+# 源码级门的取材锚点（`polaris_source_probe::crate_source!` 等宏）。dev-only：
+# 不进 lib 依赖图，不进包。零第三方依赖（只用 std）⇒ Cargo.lock 与 THIRD-PARTY 均无新增。
+polaris-source-probe = { version = "1.0.0", path = "../source-probe" }

@@ -1,0 +1,20 @@
+[package]
+name = "polaris-config-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+polaris-helper-proto = { path = "../helper-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 非法字符 rule id 文件名 sha1 派生（对齐 上游 createHash('sha1').digest('hex').slice(0,12)）。
+sha1 = "0.11"
+
+[dev-dependencies]
+# 源码级门的取材锚点（`polaris_source_probe::crate_source!` 等宏）。dev-only：
+# 不进 lib 依赖图，不进包。零第三方依赖（只用 std）⇒ Cargo.lock 与 THIRD-PARTY 均无新增。
+polaris-source-probe = { version = "1.0.0", path = "../source-probe" }
+# 真核配置门的所有临时配置、cache 与日志路径必须由 TempDir 承载，避免测试污染宿主 /tmp。
+tempfile = "3"

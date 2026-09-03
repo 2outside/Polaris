@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 浏览器直开/dev 的 CSP 兜底；打包态的响应级权威策略在 tauri.conf.json（含 frame-ancestors）。 -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws:; img-src 'self' data: https: polaris-icon: http://polaris-icon.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'"
+    />
+    <title>Polaris</title>
+  </head>
+  <body>
+    <div id="tray-root"></div>
+    <script type="module" src="/src/tray/main.tsx"></script>
+  </body>
+</html>

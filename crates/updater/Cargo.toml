@@ -1,0 +1,41 @@
+[package]
+name = "polaris-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# serde/serde_json = VersionManifest 解析（GitHub release JSON / 自定义清单）；workspace 既有依赖（非新增第三方）。
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# polaris-helper-proto = 复用 codec::is_valid_sha256_hex（去重 verify.rs 本地副本；manifest.rs 经 crate::verify:: 路径调用）。
+polaris-helper-proto = { path = "../helper-proto" }
+# sha2/hex = 核心 staged 更新 SHA256 校验（移植自 Polaris shared/file-hash.ts 的 createHash('sha256')）。
+# 与 helper 同口径（crates/helper/Cargo.toml 已用 sha2 = "0.11"）。
+sha2 = "0.11"
+hex = "0.4"
+# thiserror = UpdaterError 枚举 derive（与 core-supervisor / helper / store 等一致）。
+thiserror = "2"
+
+[features]
+# test-utils = 把 crate 内的**跨 crate 测试替身**（MockFs / MockFailOp / MemoryStateStore）暴露给下游。
+#
+# 为什么必须是 feature 而不是 `#[cfg(test)]`：`test` cfg 只在**被测 crate 自己**编译测试目标时为真；
+# 下游（src-tauri）编译自己的测试时，polaris-updater 仍是以 `test` off 编译的普通依赖 ⇒ 替身消失、
+# 下游 cfg(test) 编不过。feature 是唯一能跨 crate 传播的开关。
+#
+# 生产侧不受影响：本 feature 只由 src-tauri 的 [dev-dependencies] 打开，
+# 而 workspace 用 resolver = "2" —— dev-dependency 的 feature **不会**被统一进
+# `cargo build` / `tauri build` 的普通依赖构建（见 src-tauri/tests/test_only_symbols_gated.rs 的门）。
+test-utils = []
+
+[dev-dependencies]
+# tempfile = mock UpdateFs 落盘 + 原子 rename 的 tmp 目录（与 helper dev-deps 同源）。
+tempfile = "3"
+# 源码级门的取材锚点（`polaris_source_probe::crate_source!` 等宏）。dev-only：
+# 不进 lib 依赖图，不进包。零第三方依赖（只用 std）⇒ Cargo.lock 与 THIRD-PARTY 均无新增。
+polaris-source-probe = { version = "1.0.0", path = "../source-probe" }
+
+[lib]
+path = "src/lib.rs"
