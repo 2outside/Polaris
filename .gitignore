@@ -45,7 +45,7 @@ src-tauri/gen/
 # agent worktree 宿主目录（Claude Code 并行子代理用，纯本地、不入库）
 .claude/worktrees/
 
-# 移动端落地那条线的在制品，不随桌面端主线入库。
-# 该线落地时整块删掉这三行即可（`design/mobile/assets/.gitignore` 是它自带的，不受影响）。
+# 设计/资产交付物不入代码仓（陈先生 2026-09-04）。移动端 UI kit 已迁至 vault
+# `~/docs/polaris/design/mobile-kit/`，仓内不再有 design/；本行作为守卫保留，
+# 防止设计产物重新落回仓内。**不要因为「目录不存在了」就删掉它。**
 /design/
-/ui/src/styles/mobile-token-parity.test.ts
