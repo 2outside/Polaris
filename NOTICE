@@ -1,15 +1,49 @@
 Polaris
 Copyright (c) 2026 Outsider
 
-以子进程 / 二进制资源形式集成的第三方组件（非源码链接，mere aggregation）：
-  - sing-box (GPLv3)        — https://github.com/SagerNet/sing-box     （代理内核，sidecar 子进程）
+本项目以 MIT 许可发布，许可全文见随包分发的 LICENSE。
+Polaris is released under the MIT License. The full text ships next to this file
+as LICENSE; the copyright notice above and that permission notice must be
+included in all copies or substantial portions of the Software.
+
+以子进程 / 二进制资源形式集成的第三方组件（非源码链接）：
+  - sing-box v1.14.0 (GPLv3) — https://github.com/SagerNet/sing-box
+        随包版本对应源码：https://github.com/SagerNet/sing-box/tree/v1.14.0
+        （代理内核，以独立 sidecar 子进程运行）
   - cronet-go               — https://github.com/SagerNet/cronet-go     （NaiveProxy 核心，libcronet 动态库）
   - sing-box-dashboard      — https://github.com/SagerNet/sing-box-dashboard（面板 UI）
   - meta-rules-dat          — https://github.com/MetaCubeX/meta-rules-dat（规则集 / 地理数据 .srs）
+
+随包 sing-box 的版本真值是 `src-tauri/core-manifest.json` 的 `bundledCoreVersion`。
+上面写死的版本号与 tag 链接由 `scripts/verify-packaging.mjs confs` 与该真值对拍，
+两边不一致即构建转红 —— 版本号写在这里是因为法律声明不该让读者去翻另一个文件。
 
 **链进产物的源码级依赖**（Tauri / React / 数百个 Rust crate 等）不属 mere aggregation，
 其许可与版权声明随二进制分发，逐包登记在 `THIRD-PARTY-LICENSES.md`
 （由 `scripts/gen-third-party-licenses.mjs` 生成，依赖一变 CI 即要求重生成）。
 
-以上组件版权归各自作者所有，以独立二进制 / 数据形式分发，其许可不改变本项目的 MIT 许可。
-sing-box 以 GPLv3 发布，作为独立子进程集成（mere aggregation），不构成对 Polaris 源码的 GPL 传染。
+以上组件版权归各自作者所有，以独立二进制 / 数据形式分发。
+
+--- GPLv3 组件与本项目许可的关系 / GPLv3 components and this project's license ---
+
+Polaris 采用 mere-aggregation 立场：sing-box 以独立子进程运行、不与 Polaris 链接，
+因此 Polaris 自身源码仍以 MIT 发布。**该立场未经检验** —— GNU 官方 FAQ 明确
+「什么构成一个作品」是法律问题，最终由法院裁定。本文件不构成法律意见。
+出处：https://www.gnu.org/licenses/gpl-faq.html#MereAggregation
+
+Polaris takes the position that shipping sing-box alongside Polaris is mere
+aggregation: sing-box runs as a separate process and is not linked into Polaris,
+so Polaris's own source stays under the MIT License. This position is untested —
+the GNU FAQ states that what counts as "one work" is a legal question that is
+ultimately decided by courts. Nothing here is legal advice.
+Source: https://www.gnu.org/licenses/gpl-faq.html#MereAggregation
+
+sing-box 的完整对应源码（Corresponding Source）在上面的 tag 链接处获取 —— GPLv3 §6
+要求在二进制旁给出获取对应源码的明确指引，本段即该指引。Polaris **不自建归档或镜像**，
+可获得性依赖上游仓库；若该链接失效，请在本项目 issue 中提出。
+
+The Corresponding Source for the bundled sing-box is the upstream tag linked
+above; GPLv3 §6 requires clear directions next to the object code, and this
+paragraph is those directions. Polaris keeps no archive or mirror of its own, so
+availability depends on the upstream repository. If that link stops working,
+please open an issue on this project.

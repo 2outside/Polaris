@@ -64,6 +64,10 @@ test('共享 helper、Tauri、资源与前端依赖变更强制四平台', () =>
     'src-tauri/tauri.conf.json',
     '.github/workflows/package.yml',
     'scripts/fetch-dashboard.mjs',
+    // 三份许可文本同进同出：它们都随包分发、都被 `verify-packaging.mjs confs` 断言
+    // （NOTICE 的 sing-box 版本还要与 core-manifest 对拍）。少登记一份 = 改它时那道门整步 skip。
+    'LICENSE',
+    'NOTICE',
     'THIRD-PARTY-LICENSES.md',
     'ui/pnpm-lock.yaml',
   ]) {

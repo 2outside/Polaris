@@ -6,6 +6,8 @@
       "../resources/mac-x64/",
       "../resources/dashboard/",
       "../THIRD-PARTY-LICENSES.md",
+      "../NOTICE",
+      "../LICENSE",
       "../resources/data/"
     ]
   }

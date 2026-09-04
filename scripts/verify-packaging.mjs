@@ -13,7 +13,10 @@
  *     纯静态：只读 4 个平台 conf + core-manifest.json + package.yml。不需要构建产物。
  *     守：公共资源不丢 / 每个 conf 恰含一个平台内核 / base 不含任何平台内核 /
  *         每个 conf 都被 workflow 显式引用（改名即红）/
- *         **per-platform conf 不得含未登记条目**（不变量 E，反向；见下）。
+ *         **per-platform conf 不得含未登记条目**（不变量 E，反向；见下）/
+ *         **许可文本的整条分发链**（LICENSE / NOTICE / THIRD-PARTY-LICENSES.md 各恰 1 条、
+ *         NOTICE 的 sing-box 版本与 core-manifest 对拍、便携 zip 那条腿也带上；见
+ *         [`checkLicenseArtifacts`]）。
  *
  *   node scripts/verify-packaging.mjs payload --label <label> --root <bundle 根>
  *     构建后：`--root` 收 **bundle 根**（`target/release/bundle`，传了 --target 时
@@ -524,6 +527,7 @@ function checkConfs() {
 
   checkWindowsInstallerHooks(base);
   checkMacOpenGuide();
+  checkLicenseArtifacts(base, platforms, manifest, workflow);
   if (workflow !== null) {
     checkNamesOnlyDiscipline(workflow);
     checkLinuxAppImagePostprocess(workflow);
@@ -535,6 +539,192 @@ function checkConfs() {
     note(
       `conf 不变量：平台 ${platforms.join(', ')}，各含 1 份内核 + ${baseResources.length} 项公共资源，` +
         `且无未登记条目（不变量 E）`
+    );
+  }
+}
+
+/**
+ * 随包分发的三份许可文本（**资源根相对路径 `_up_/` 那三份**）。
+ * 顺序即断言顺序，无其它语义；`../` 形态是 conf 里的写法，`_up_` 形态见 [`resourceRelpath`]。
+ */
+const LICENSE_CONF_ENTRIES = ['../LICENSE', '../NOTICE', '../THIRD-PARTY-LICENSES.md'];
+
+/** portable zip 里那三份的文件名（zip 是平铺结构，没有 `_up_` 前缀）。 */
+const LICENSE_BASENAMES = ['LICENSE', 'NOTICE', 'THIRD-PARTY-LICENSES.md'];
+
+/** workflow 里某个 step 的**正文**（不含 step 名那行），找不到返回 null。 */
+function workflowStepBody(workflow, stepName) {
+  const marker = `\n      - name: ${stepName}\n`;
+  const at = workflow.indexOf(marker);
+  if (at < 0) return null;
+  const from = at + marker.length;
+  const next = workflow.indexOf('\n      - name:', from);
+  return workflow.slice(from, next < 0 ? workflow.length : next);
+}
+
+/**
+ * 许可文本的**整条分发链**：登记进包 → 文本本身与真值对拍 → 便携腿（另一条腿）也带上。
+ *
+ * 存在理由（2026-09-04，开箱实证）：`Polaris_1.0.0_amd64.deb` 解包后，包内 license 类文件只有
+ * `_up_/THIRD-PARTY-LICENSES.md` 与面板自带的 OFL —— **`LICENSE` 与 `NOTICE` 都不在包里**，
+ * 而包里带着 GPLv3 的 `resources/linux/sing-box`。两条后果：
+ *   ① Polaris 违反自己的 MIT（MIT 要求版权声明随所有副本分发）；
+ *   ② 包里那份 GPLv3 内核没有任何来源说明（GPLv3 §6 要在二进制旁给出获取对应源码的明确指引）。
+ * 当时四条腿全绿：inventory 的登记表只问「不该在的在不在」，`bundle.resources` 从没登记过这两个文件，
+ * 于是「从来就没进过包」这件事没有任何一道门问过。
+ *
+ * 🔴 本函数刻意**不依赖不变量 A 的传递性**。A 的形状是「base 有 ⇒ 四份平台 conf 也要有」——
+ * base 的 `resources` 被整个清空时 A 恒真（前件为假），四个包一份许可文本都不带，A 仍全绿。
+ * 这正是「只写否定式判据会被『什么都没发生』骗过」的实例，故这里对 base 与四份平台 conf
+ * **各自**做正面断言：三个条目各恰 1 条（少 = 不进包，多 = 重复铺）。
+ */
+function checkLicenseArtifacts(base, platforms, manifest, workflow) {
+  const errorsBefore = errors.length;
+  // ── ① 正面断言：五份 conf 各自都把三份许可文本登记为「恰 1 条」。
+  const confTargets = [['tauri.conf.json', base.bundle?.resources]];
+  for (const p of platforms) {
+    const confName = CORE_TO_CONF[p];
+    if (!confName) continue;
+    const confPath = join(SRC_TAURI, confName);
+    if (!existsSync(confPath)) continue; // 缺 conf 由不变量本体判红，这里不重复报
+    let conf;
+    try {
+      conf = readJson(confPath, `平台 '${p}' 的许可文本登记无从断言`);
+    } catch {
+      continue;
+    }
+    confTargets.push([confName, conf.bundle?.resources]);
+  }
+  for (const [confName, res] of confTargets) {
+    if (!Array.isArray(res)) continue; // 同上：形态错误由不变量本体判红
+    for (const entry of LICENSE_CONF_ENTRIES) {
+      const n = res.filter((e) => e === entry).length;
+      if (n !== 1) {
+        fail(
+          `src-tauri/${confName}: bundle.resources 里 ${JSON.stringify(entry)} 应恰 1 条，实为 ${n} 条 —— ` +
+            `随二进制分发 LICENSE（MIT 的分发条件）与 NOTICE（包内 GPLv3 内核的来源指引）不是可选项；` +
+            `v1.0.0 的 deb 就是因为这两条从未登记而整条逃逸`
+        );
+      }
+    }
+  }
+
+  // ── ② 三份文本必须存在且非空（0 字节的 LICENSE 与没有 LICENSE 在法律上等价）。
+  const texts = {};
+  for (const name of LICENSE_BASENAMES) {
+    const abs = join(ROOT, name);
+    if (!existsSync(abs) || statSync(abs).size === 0) {
+      fail(`${name}: 不存在或为 0 字节 —— 它被登记进 bundle.resources，进包的会是一份空文件`);
+      continue;
+    }
+    texts[name] = readFileSync(abs, 'utf8');
+  }
+  if (!texts.NOTICE || !texts.LICENSE) return;
+
+  // ── ③ 版本一致性：NOTICE 里写死的 sing-box 版本 == core-manifest 的 bundledCoreVersion。
+  //
+  // 判据由代码持有：手写在法律声明里的版本号一定会漂（换核只改 core-manifest，没人记得回头改 NOTICE），
+  // 漂了的后果是 NOTICE 指向的对应源码 tag 与包里那份二进制**不是同一份**，即 GPLv3 §6 的指引失效。
+  // 反过来「只留个 JSON 指针」也不行 —— 法律声明不该让读者去翻另一个文件。故两处都要，且必须对拍。
+  //
+  // 取材面是 NOTICE 全文（纯文本，无注释/字符串层需要剥）。两条正则各自**至少命中一次**是正面断言：
+  // 只写「不许出现别的版本号」会被「把版本号整段删掉」骗过（删了就一处都不命中，仍是零违反）。
+  const version = String(manifest.bundledCoreVersion ?? '');
+  if (!/^\d[\w.\-+]*$/.test(version)) {
+    fail(`core-manifest.json: bundledCoreVersion ${JSON.stringify(manifest.bundledCoreVersion)} 形态不可用 —— NOTICE 版本对拍无从进行`);
+    return;
+  }
+  const proseVersions = [...texts.NOTICE.matchAll(/sing-box\s+v([\d][\w.\-+]*)/g)].map((m) => m[1]);
+  const tagVersions = [...texts.NOTICE.matchAll(/https:\/\/github\.com\/SagerNet\/sing-box\/tree\/v([\d][\w.\-+]*)/g)].map((m) => m[1]);
+  if (proseVersions.length === 0) {
+    fail(`NOTICE: 找不到形如 \`sing-box v<版本>\` 的版本提法 —— 随包内核版本必须在 NOTICE 正文里显式出现（应为 v${version}）`);
+  }
+  if (tagVersions.length === 0) {
+    fail(
+      `NOTICE: 找不到 \`https://github.com/SagerNet/sing-box/tree/v<版本>\` 形态的源码 tag 链接 —— ` +
+        `GPLv3 §6 要求在二进制旁给出获取对应源码的明确指引，缺了这条链接指引就不成立（应为 v${version}）`
+    );
+  }
+  for (const [where, list] of [['正文版本提法', proseVersions], ['源码 tag 链接', tagVersions]]) {
+    for (const v of list) {
+      if (v !== version) {
+        fail(
+          `NOTICE 的${where}写的是 v${v}，core-manifest.json 的 bundledCoreVersion 是 ${version} —— ` +
+            `声明指向的对应源码与包里那份二进制不是同一版，GPLv3 §6 的源码指引随之失效`
+        );
+      }
+    }
+  }
+
+  // ── ④ 版权行单一真值：NOTICE 的版权行必须与 LICENSE 里那行逐字一致（同 checkMacOpenGuide 的口径）。
+  //     两处各写一份就会漂，而 MIT 要求分发的正是「上面那条版权声明」。
+  const copyright = texts.LICENSE.match(/^Copyright \(c\).+$/m);
+  if (!copyright) {
+    fail('LICENSE: 找不到 `Copyright (c) ...` 行 —— MIT 要求随副本分发的就是它');
+  } else if (!texts.NOTICE.includes(copyright[0])) {
+    fail(`NOTICE: 缺与 LICENSE 逐字一致的版权行 \`${copyright[0]}\` —— 两处各写一份必漂`);
+  }
+
+  // ── ⑤ mere-aggregation 只能作为**立场**出现，不能写成事实。
+  //
+  // GNU 官方 FAQ 明确「什么构成一个作品」是法律问题、最终由法院裁定；把未经检验的立场写成
+  // 「不构成 GPL 传染」这种断言，是拿一句自我裁决当结论。这里钉的是两个稳定锚点（FAQ 出处 +
+  // 中英各一处「未经检验」标记），不钉具体措辞 —— 措辞可改，「有出处 + 说明未经检验」不可少。
+  const FAQ = 'https://www.gnu.org/licenses/gpl-faq.html#MereAggregation';
+  if (!texts.NOTICE.includes(FAQ)) {
+    fail(`NOTICE: mere-aggregation 立场缺出处，应引用 ${FAQ}`);
+  }
+  for (const [lang, marker] of [['中文', '未经检验'], ['英文', 'untested']]) {
+    if (!texts.NOTICE.includes(marker)) {
+      fail(
+        `NOTICE: ${lang}段缺「${marker}」标记 —— mere-aggregation 是未经法院检验的立场，` +
+          `写成结论就是把自我裁决当事实；且法律上起作用的句子必须中英双语（单语等于对另一半用户没写）`
+      );
+    }
+  }
+
+  // ── ⑥ 便携腿（另一条腿）：portable zip 与 tauri bundler 各铺各的，改 conf **不会**惠及便携。
+  //     2026-09-04 实测：便携 zip 连 THIRD-PARTY-LICENSES.md 都没有，三份许可文本一份不带。
+  const stage = workflow === null ? null : workflowStepBody(workflow, 'Build Windows portable zip');
+  const verify = workflow === null ? null : workflowStepBody(workflow, 'Verify portable zip contents');
+  if (workflow === null) {
+    // workflow 读不到本身已在 checkConfs 判红，这里不重复报，但便携腿这一半确实没验到，不能进 ok 行。
+  } else if (stage === null) {
+    fail("package.yml: 找不到 step 'Build Windows portable zip' —— 便携腿的许可文本无从断言");
+  } else {
+    const lines = stage.split('\n').map(stripYamlComment);
+    for (const name of LICENSE_BASENAMES) {
+      const hits = lines.filter((l) => l.includes(`Copy-Item ${name} $staging/`)).length;
+      if (hits !== 1) {
+        fail(
+          `package.yml 'Build Windows portable zip': 应恰有 1 条 \`Copy-Item ${name} $staging/\`，实为 ${hits} 条 —— ` +
+            `便携 zip 与安装器是两条独立的腿，bundle.resources 只惠及后者；便携用户拿到二进制却没有许可文本`
+        );
+      }
+    }
+  }
+  if (workflow !== null) {
+    if (verify === null) {
+      fail("package.yml: 找不到 step 'Verify portable zip contents' —— 便携 zip 的开箱验缺席（改了打包脚本却没人核验产物）");
+    } else {
+      for (const name of LICENSE_BASENAMES) {
+        if (!verify.includes(`"${name}"`)) {
+          fail(
+            `package.yml 'Verify portable zip contents': 开箱验没有核对 "${name}" —— ` +
+              `只验打包脚本文本不验产物，正是这条腿此前漏掉三份许可文本的形态`
+          );
+        }
+      }
+    }
+  }
+
+  // 与 conf 那条 note 同口径：失败时不得打这句（它字面断言「三份都登记了、版本对上了、便携腿也带了」）。
+  if (errors.length === errorsBefore) {
+    note(
+      `许可文本分发链：${LICENSE_BASENAMES.join(' / ')} 在 base + ${platforms.length} 份平台 conf 里各恰 1 条；` +
+        `NOTICE 的 sing-box 版本与 tag 链接 = core-manifest v${manifest.bundledCoreVersion}，版权行与 LICENSE 逐字一致，` +
+        `mere-aggregation 作为**未经检验的立场**并附 GNU FAQ 出处；Windows portable zip 三份都拷入并开箱核验` +
+        `${workflow === null ? '（⚠️ workflow 读不到，便携腿这一半未验）' : ''}`
     );
   }
 }
@@ -1965,6 +2155,20 @@ function payloadAllowRules(label, coreDir, srsCount) {
       min: 1,
       max: 1,
       why: '随二进制分发第三方依赖许可证正文是 MIT/Apache-2.0/OFL 的分发条件，缺了是许可证违规而不是少个文件。',
+    },
+    {
+      id: 'own-license',
+      re: /^_up_\/LICENSE$/,
+      min: 1,
+      max: 1,
+      why: 'Polaris 自己的 MIT 许可全文。MIT 要求版权声明与许可声明随**所有副本**分发 —— 缺了不是「少个文档」，是本项目自己违反自己的许可（v1.0.0 的 deb 实测就没有它）。',
+    },
+    {
+      id: 'notice',
+      re: /^_up_\/NOTICE$/,
+      min: 1,
+      max: 1,
+      why: '声明包内以子进程/二进制形式随行的第三方组件（sing-box GPLv3、libcronet、面板、规则数据）及其对应源码去处。GPLv3 §6 要求在二进制旁给出获取 Corresponding Source 的明确指引，这份文件就是那份指引 —— 它不进包，包里那份 GPLv3 内核就没有任何来源说明。',
     },
     {
       id: 'geo-srs',

@@ -394,6 +394,14 @@ const SHARED_PACKAGE_PATHS = new Set([
   '.github/workflows/release-risk.yml',
   'Cargo.lock',
   'Cargo.toml',
+  // 🔴 三份许可文本是**同一个判据面**，必须整组登记。此前只有 THIRD-PARTY-LICENSES.md 在表里，
+  //    LICENSE / NOTICE 落表外 ⇒ hasPackage=false ⇒ release-risk 的
+  //    `Verify packaging conf invariants` 整步 skip。2026-09-04 给 NOTICE 加了「版本号必须与
+  //    core-manifest 的 bundledCoreVersion 对拍」的门之后，这就成了「门守着 NOTICE，而改 NOTICE
+  //    恰好不触发这道门」—— 门在但没牙。三份都随包分发、都被 verify-packaging.mjs confs 断言，
+  //    故三份同进同出。
+  'LICENSE',
+  'NOTICE',
   'THIRD-PARTY-LICENSES.md',
   'scripts/classify-ci-impact.mjs',
   'scripts/classify-ci-impact.test.mjs',

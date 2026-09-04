@@ -1090,6 +1090,13 @@ jobs:
           Copy-Item resources/win $staging/resources/win -Recurse -Force
           Copy-Item resources/dashboard $staging/resources/dashboard -Recurse -Force
           Copy-Item resources/data $staging/resources/data -Recurse -Force
+          # 🔴 许可文本：便携 zip 与 Tauri bundler 是**两条独立的腿**，`bundle.resources` 只惠及
+          #    安装器，改 conf 不会自动惠及这里（2026-09-04 实证：便携 zip 连
+          #    THIRD-PARTY-LICENSES.md 都没有）。缺 LICENSE = Polaris 违反自己的 MIT；
+          #    缺 NOTICE = zip 里那份 GPLv3 的 sing-box.exe 没有任何来源指引（GPLv3 §6）。
+          Copy-Item LICENSE $staging/
+          Copy-Item NOTICE $staging/
+          Copy-Item THIRD-PARTY-LICENSES.md $staging/
           # 便携形态标记（内容是给用户看的「勿删」说明；判据只看文件在不在）。
           Set-Content -Path "$staging/portable.marker" -Encoding utf8 -Value @(
             "Polaris portable edition marker - DO NOT DELETE."
@@ -1105,10 +1112,10 @@ jobs:
           # 那两条断言只有 tag 时的聚合口径量得到 —— 超限要等四条腿的构建成本全付完才发现。
           Compress-Archive -Path "$staging/*" -DestinationPath "dist-win/polaris-portable-${{ env.BUILD_LABEL }}.zip" -Force
 
-      # 便携标记必须真的在 zip 里 —— 开包核验**产物本身**，不是核验上一步的脚本文本。
-      # 缺它 ⇒ 便携用户恒被推安装器（#72 形态错配本体复发），故这里 throw 让整条腿硬失败，
-      # 而不是让一个「看着成功、装出来错形态」的 zip 进 release。
-      - name: Verify portable marker is inside the zip
+      # 便携标记与许可文本必须真的在 zip 里 —— 开包核验**产物本身**，不是核验上一步的脚本文本。
+      # 缺 marker ⇒ 便携用户恒被推安装器（#72 形态错配本体复发）；缺许可文本 ⇒ 许可证违规。
+      # 故这里 throw 让整条腿硬失败，而不是让一个「看着成功、装出来错形态」的 zip 进 release。
+      - name: Verify portable zip contents
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -1123,8 +1130,18 @@ jobs:
           if (-not (Test-Path "$probe/polaris.exe" -PathType Leaf)) {
             throw "polaris.exe missing from $zip"
           }
+          # 许可文本：非 0 字节才算数（拷了个空文件与没拷在法律上等价）。
+          foreach ($lic in @("LICENSE", "NOTICE", "THIRD-PARTY-LICENSES.md")) {
+            $p = Join-Path $probe $lic
+            if (-not (Test-Path $p -PathType Leaf)) {
+              throw "$lic missing from $zip - shipping binaries without it violates the MIT notice condition (LICENSE) / leaves the bundled GPLv3 sing-box with no source offer (NOTICE)"
+            }
+            if ((Get-Item $p).Length -eq 0) {
+              throw "$lic is 0 bytes inside $zip - an empty license text is the same as none"
+            }
+          }
           Remove-Item $probe -Recurse -Force
-          Write-Host "portable zip contains polaris.exe + portable.marker"
+          Write-Host "portable zip contains polaris.exe + portable.marker + LICENSE/NOTICE/THIRD-PARTY-LICENSES.md"
 
       # 产物命名 ↔ updater 选包规则的机器断言（与 github.rs::find_suitable_update_asset 同口径）：
       # dist-win/ 下「`.exe` 且名含 `win`」必须**恰好一个**且含 `setup`。

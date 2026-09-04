@@ -62,7 +62,9 @@
       "core-manifest.json",
       "../resources/dashboard/",
       "../resources/data/",
-      "../THIRD-PARTY-LICENSES.md"
+      "../THIRD-PARTY-LICENSES.md",
+      "../NOTICE",
+      "../LICENSE"
     ],
     "linux": {
       "deb": {

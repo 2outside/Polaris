@@ -6,6 +6,8 @@
       "../resources/win/",
       "../resources/dashboard/",
       "../THIRD-PARTY-LICENSES.md",
+      "../NOTICE",
+      "../LICENSE",
       "../resources/data/"
     ]
   }
