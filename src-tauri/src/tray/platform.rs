@@ -172,6 +172,64 @@ fn install_mouse_monitor(app: &AppHandle) {
     }
 }
 
+/// 装 macOS 的**屏幕参数变化**观察者（腿 B 的 mac 权威源）。
+///
+/// # 为什么是 `NSApplicationDidChangeScreenParametersNotification`
+///
+/// 它是 AppKit 里唯一一个「屏幕这件事变了」的总口：显示器增删、改分辨率、改缩放、在系统设置里
+/// 重排显示器，全从这里发。Tauri/tao 归一出来的 `WindowEvent::ScaleFactorChanged` 只跟 backing
+/// scale 走（mac 侧源头是 `windowDidChangeBackingProperties`），同 DPI 下换分辨率、插拔扩展屏
+/// 一律不发——而托盘浮层的窗高恰恰是按**屏幕**算的。
+///
+/// 前端那条 `matchMedia` 腿在 Windows（WebView2 = Blink）上已实测，在 WKWebView 上**未核实**，
+/// 所以 mac 这一半没有第二个人守：漏了它，用户在 mac 上改完分辨率再弹菜单，看到的就是按旧屏算出
+/// 来的窗——矮了则「退出」被挤进滚动区，高了则窗体出屏、连滚都够不到。
+///
+/// # 为什么装一次就不拆
+///
+/// 观察者与 app 同寿命，而浮层 WebView 不是：`keepTrayMenuWarm=false` 时它隐藏 120s 就被回收、
+/// 下次点击再冷建，屏幕参数在那期间照样会变。回调本身在窗不存在时是 no-op（见
+/// [`notify_screen_change_remeasure`](super::window::notify_screen_change_remeasure)），故不存在
+/// 「装着但危险」的窗口期，也就没有拆的理由。`Once` 保证重复建窗不会叠出第二个观察者
+/// （同 [`install_mouse_monitor`] 的 `guard.is_some()` 幂等，差别只在这条永不 remove）。
+///
+/// ⚠️ 本机（Linux）跑不了：**已核实**的只到编译期——同一份代码在 `x86_64-apple-darwin` 上
+/// `cargo check` 通过（API 路径、block 签名、`unsafe` 面）；「通知确实会 fire」未经真机验证。
+#[cfg(target_os = "macos")]
+pub(super) fn install_screen_change_observer(app: &AppHandle) {
+    use block2::RcBlock;
+    use core::ptr::NonNull;
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
+    use std::sync::Once;
+
+    static INSTALLED: Once = Once::new();
+    let app = app.clone();
+    INSTALLED.call_once(move || {
+        // queue=None ⇒ block 在**发通知的那个线程**同步跑，即 AppKit 主线程；`AppHandle` 是
+        // `Send + Sync`，`eval` 自身跨线程安全，故不再排一次 `run_on_main_thread`。
+        let handler: RcBlock<dyn Fn(NonNull<NSNotification>)> =
+            RcBlock::new(move |_notification: NonNull<NSNotification>| {
+                super::window::notify_screen_change_remeasure(&app);
+            });
+        // SAFETY: name 是 AppKit 导出的常量通知名；object=None（任意发送者）、queue=None（同步派发）
+        // 都是该 API 允许的组合；block 只捕获 `AppHandle`（`Send + Sync`），满足「block must be
+        // sendable」。返回值是 +1 owned 的观察者 token。
+        let observer = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
+                None,
+                &handler,
+            )
+        };
+        // token 与 app 同寿命：故意不回收那 +1（`Once` 保证只泄一次）。存指针而不是 `Retained` 的
+        // 理由同 `mouse_monitor`——后者 `!Send`，但这里连存都不用存：永不 `removeObserver`。
+        let _ = Retained::into_raw(observer);
+    });
+}
+
 /// 拆全局鼠标监听器（defect#3/W32）。任一收起路径经 [`hide_overlay`] 调用。`removeMonitor:` 必须在**主
 /// 线程**，故经 `run_on_main_thread` 调度（同步 command 在 WebView2 IPC 分发栈=主线程内直跑、
 /// `async fn` command 才被 spawn 到异步 runtime；Focused(false)/toggle_overlay/monitor handler 在

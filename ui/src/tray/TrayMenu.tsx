@@ -51,6 +51,14 @@ import { latLevel } from '@/components/screens/shared/format';
 // 节点行国旗：与首页出口选单**同一个渲染器 + 同一个数据源**（名称派生 `flagCodeForName`）——
 // 那处的语义是「这个节点自称在哪」，托盘节点行是同一件事的另一个视图，故共用而不新写。
 // 跨目录只读引用，同上面 `shared/format` 的先例。
+// 窗高收敛（锁 + 屏幕换代重武装）住在纯逻辑模块里：本仓 vitest 是 node 环境，effect/hook 跑不起来，
+// 判据只能挂在离开 React 也能跑的那一半上（同 `settings-logic.ts::wireUpdateProgress` 的做法）。
+import {
+  armFontsReadyRemeasure,
+  armScreenChangeRemeasure,
+  resetTrayHeightLock,
+  trayReportedHeight,
+} from './tray-menu-height';
 import { flagCodeForName } from '@/components/screens/nodes/NdFlag';
 import { FlagImg } from '@/components/FlagImg';
 // FakeIP-TUN 待纠正快照消费（纯函数）：与 HomeScreen.applyIntercept 同源，切到 TUN 时把迁移冻结的
@@ -99,6 +107,8 @@ declare global {
     __POLARIS_TRAY_GENERATION__?: number;
     /** macOS 非激活托盘窗的指针坐标桥；仅补 WebKit 丢掉的 hover，不参与点击/焦点。 */
     __POLARIS_NATIVE_HOVER__?: (clientX: number, clientY: number) => void;
+    /** 宿主每次展开浮层时经 eval 桥调（`tray/window.rs::show_ready_overlay`）：清高度锁并重量一次。 */
+    __POLARIS_TRAY_REMEASURE__?: () => void;
   }
 }
 
@@ -177,9 +187,18 @@ export default function TrayMenu() {
   // 托盘直接读本 store —— 无需后端排序 command（纯渲染端视图偏好，同源 webview 天然共享）。
   const sortByLatency = useNodeSortStore((s) => s.sortByLatency);
   const menuRef = useRef<HTMLDivElement>(null);
-  // 每代 WebView 在配置 hydrate 完成后的主视图自然高只记一次。节点视图的折叠/展开只应改变
-  // 卡片内部滚动内容，不应让外层菜单忽高忽低；冷态回收后 ref 随 WebView 销毁，下一代会按新 DPI/语言重量。
+  // 高度锁：**主视图最近一次量到的值胜**，节点视图的测量不进锁，因此折叠/展开只改变卡片内部滚动
+  // 内容，不让外层菜单忽高忽低。判据与清锁时机在 `tray-menu-height.ts`。
+  // 挡住「忽高忽低」的是下面那个 `view === 'main'` 条件，不是「只认第一次」—— 后者已去掉：它给锁
+  // 加了时间维度，把「漏掉一个触发源」从「晚一拍自愈」放大成「永久错」，而触发源是枚举出来的。
   const fixedMenuHeightRef = useRef<number | null>(null);
+  // 清锁**动作**的落点，同时是重量 effect 的依赖：清了锁还得真的再量一次——屏幕变小/换屏时
+  // DOM 内容一个字节没动，ResizeObserver 不会自己 fire，只清锁的话没人来触发下一次测量。
+  const [remeasureNonce, setRemeasureNonce] = useState(0);
+  const requestRemeasure = useCallback(() => {
+    resetTrayHeightLock(fixedMenuHeightRef);
+    setRemeasureNonce((n) => n + 1);
+  }, []);
   // 最近一次已知的 config.uiTheme（hydrate 写）。onFocus / matchMedia 监听是**挂载一次**的闭包，
   // 直接读 config state 会捕获到过期值 → 用 ref 拿最新 uiTheme，主题折算才跟得上配置变更。
   const uiThemeRef = useRef<UserConfig['uiTheme']>(undefined);
@@ -206,6 +225,21 @@ export default function TrayMenu() {
 
   // W32：主窗口不在前台时 WebKit 会丢掉 hover 事件，但 accept_first_mouse 已能让点击直达。
   // 这里只注册主进程的坐标桥；一旦 WebKit 恢复真实 mousemove，立即清桥接 class，让原生 :hover 接管。
+  // 腿 A：宿主每次展开浮层都清一次高度锁（桥由 `tray/window.rs::show_ready_overlay` eval 调）。
+  // 为什么必须由宿主推：show 那条路径（reposition → show → reposition → focus）一个字节都没往
+  // renderer 送，被温着的 WebView 重新显示时前端毫不知情。
+  // 为什么不挂在既有的 `window.focus` 上：那条腿的触发源是**获焦**而不是**展示**，而这个浮层
+  // 恰恰是为「不抢焦点」而生的 non-activating 宿主（`tray/platform.rs`），本文件已有多处为
+  // WebKit 在非激活窗上丢事件打的补丁（`__POLARIS_NATIVE_HOVER__` 补的就是丢掉的 mousemove）——
+  // 把「量不量」押在一个已知会丢的事件上，等于给这次修复留一条随机失效的腿。
+  // 复用既有 eval 桥形态，**不新开 IPC 通道**：这是一次单向、无载荷的通知，通道的全部成本都是净亏。
+  useLayoutEffect(() => {
+    window.__POLARIS_TRAY_REMEASURE__ = requestRemeasure;
+    return () => {
+      delete window.__POLARIS_TRAY_REMEASURE__;
+    };
+  }, [requestRemeasure]);
+
   useLayoutEffect(() => {
     window.__POLARIS_NATIVE_HOVER__ = applyNativeTrayHover;
     const clearNativeHover = () => applyNativeTrayHover(Number.NaN, Number.NaN);
@@ -358,10 +392,26 @@ export default function TrayMenu() {
   // ALL-NODES 视图延迟徽标：逐节点流式回填，不等整批。写入口与主窗共用 `use-latency-store`
   // （本窗是**另一个 store 实例**，见该文件「托盘窗是独立 JS 堆」一节——两窗各自收敛到同一后端事件流）。
   // TrayMenu 是托盘窗的根组件、生命周期即窗口生命周期 ⇒ 这里就是本窗的「顶层持久位置」。
+  // 腿 B（**次级**）：菜单正开着时屏幕换代（改分辨率 / 拖到另一块屏 / 插拔扩展显示器）也要重新收敛。
+  // 权威信号在宿主侧 —— mac 的 `NSApplicationDidChangeScreenParametersNotification`、Win 的
+  // `WM_DPICHANGED` 经 tao 归一成的 `WindowEvent::ScaleFactorChanged`，两者都经腿 A 那条 eval 桥
+  // 推进来（`tray/{platform,window}.rs`）。本腿留着覆盖宿主够不着的一类：浏览器级缩放（Ctrl +/-）
+  // 与 Windows 上同 DPI 的分辨率变化（`WM_DISPLAYCHANGE` 要自挂窗口过程才拿得到）。
+  // 看屏幕不看窗、以及为什么每次 fire 后必须用新值重建 query，理由都在
+  // `armScreenChangeRemeasure` 的头注里；核实程度分平台，见 `screenMetricQueries`。
+  useEffect(() => armScreenChangeRemeasure(window, requestRemeasure), [requestRemeasure]);
+
+  // 腿 C（**双保险**）：字体落定后再收敛一次。全新安装后第一次展开，`config` 到位早于 Web 字体换上，
+  // 度量因此偏矮。锁改成「主视图最近值胜」之后本腿不再是必需 —— 字体换上会引起真实重排，
+  // `ResizeObserver` 本来就会 fire 并把锁刷成新值；留着它是因为「字体落定」与「布局重排」不是
+  // 同一件事的两个名字（同宽回落、只改基线时可能量不出尺寸变化），而它的成本只是一个 promise 回调。
+  useEffect(() => armFontsReadyRemeasure(document, requestRemeasure), [requestRemeasure]);
+
   useEffect(() => subscribeLatencyEvents(), []);
 
-  // 首次自适应、随后固高：配置 hydrate 完成前允许宿主随主视图自然高收敛；完成后锁住该高度。
-  // 节点视图再长也只在卡片内部滚动，全部折叠也不会把整个自绘菜单缩成一截。
+  // 每次重排都重新收敛：主视图的每一次测量都写进锁，节点视图再长也只在卡片内部滚动，全部折叠也
+  // 不会把整个自绘菜单缩成一截（那段时间回报的是最近一次主视图的值）。
+  // 锁的清空由上面三条腿负责（展开 / 屏幕换代 / 字体落定），`remeasureNonce` 是它们逼这里重跑的那条依赖。
   useLayoutEffect(() => {
     const report = () => {
       // 不能只报 `rect.bottom`：初始宿主只有 420px，`.tray-menu` 又以 `100vh` 为 max-height，rect 已被
@@ -380,10 +430,11 @@ export default function TrayMenu() {
         h = rect.top + Math.max(rect.height, naturalMenuHeight) + mb;
       }
       const measuredHeight = Math.ceil(h);
-      if (fixedMenuHeightRef.current === null && config && view === 'main') {
-        fixedMenuHeightRef.current = measuredHeight;
-      }
-      const fixedHeight = fixedMenuHeightRef.current ?? measuredHeight;
+      const fixedHeight = trayReportedHeight(
+        fixedMenuHeightRef,
+        measuredHeight,
+        !!config && view === 'main',
+      );
       void invoke(IPC_CHANNELS.TRAY_RESIZE, { height: fixedHeight }).catch(() => {});
     };
     report();
@@ -391,7 +442,7 @@ export default function TrayMenu() {
     if (menuRef.current) ro.observe(menuRef.current);
     ro.observe(document.body);
     return () => ro.disconnect();
-  }, [config, view]);
+  }, [config, view, remeasureNonce]);
 
   const hide = () => void invoke(IPC_CHANNELS.TRAY_HIDE).catch(() => {});
 

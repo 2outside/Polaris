@@ -1128,6 +1128,8 @@ fn main() {
             version_get_info,
             update_check,
             update_download,
+            // 更新卡重挂载后回读最后一帧进度（切页/窗口重建后不再退回 idle）。
+            update_get_progress,
             update_install,
             update_skip,
             // D14：IPC 通道 update:openReleases 已随 D12 从前端退役，但本命令仍被

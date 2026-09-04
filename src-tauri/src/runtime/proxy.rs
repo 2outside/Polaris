@@ -670,6 +670,27 @@ pub trait ProxyErrorEmitter: Send + Sync {
     /// `status` = 弹框时刻的 helper 快照（供文案分流「安装」vs「修复」）。
     fn prompt_helper_gate(&self, status: &HelperStatusSnapshot) -> HelperGateDecision;
 
+    /// **helper「可升级」的温和提示**（TUN 起核汇流点的第二条腿，
+    /// [`ProxyRuntime::run_helper_gate`] 调）：helper 已装、能用，但不是随包那一版时，
+    /// 弹一次原生框问用户「现在升级还是直接继续」。
+    ///
+    /// # 为什么**不复用** [`prompt_helper_gate`](Self::prompt_helper_gate)
+    ///
+    /// 那条的值域里有 [`HelperGateDecision::Abort`]，语义是「**不起核**」；而本腿的既定决策是
+    /// **永不阻断** —— 把一个能表达「别起核」的值域接进一条不许阻断的腿，日后任何一次误用都是
+    /// 比原缺陷严重得多的回归（原缺陷只是少提示一次，误用是把一次本来能成功的 TUN 启动变成失败）。
+    /// 故另起一个只有 bool 的方法：想让它阻断，得先改签名。
+    ///
+    /// 返回值 = **用户是否选了「升级并继续」**。升级动作本身在实现方内就地完成（理由同
+    /// `prompt_helper_gate`：「弹框 → 授权 → 轮询就绪」是一段不可分割的同步交互），
+    /// 失败只记日志、**不抛**；调用方无论拿到哪个值都照常继续起核，本返回值只用于日志分流。
+    ///
+    /// **同步签名**：内含 `blocking_show` 与 `install()`（osascript/UAC/pkexec 可阻塞 30s+），
+    /// 调用方负责在 `spawn_blocking` 里调它，绝不在 async worker 或 Tauri 主线程上直调。
+    ///
+    /// `status` = 弹框时刻的 helper 快照（供日志记录当前 proto / build 身份）。
+    fn prompt_helper_upgrade(&self, status: &HelperStatusSnapshot) -> bool;
+
     /// **B1 隐私模式活态**（`generate_deps` 注入 `GenerateConfigDeps::privacy_mode` 用）。
     ///
     /// # 为什么读它要经 emitter，而不是 `ProxyRuntime` 自己存一份
@@ -924,6 +945,70 @@ impl ProxyErrorEmitter for AppHandleProxyErrorEmitter {
         }
         HelperGateDecision::Proceed
     }
+
+    fn prompt_helper_upgrade(&self, status: &HelperStatusSnapshot) -> bool {
+        use tauri::Manager;
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+        // 同 `prompt_helper_gate` 的首件事：先把主窗拉到前台。本腿的发起方同样包含**托盘切模式 /
+        // 启动自动连接 / 去抖重启**，此时主窗常已收进托盘 —— 不拉前台则原生弹框可能出现在用户看不到的
+        // 层级，表现为「点了没反应」。失败不阻断（无窗口时照样弹应用级模态）。
+        if let Some(w) = self.app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        log::info!(
+            "helper 可升级提示：当前 proto {:?} / build {:?}，随包期望 build {}",
+            status.version,
+            status.helper_build_id,
+            status.expected_build_id
+        );
+
+        // 文案走 Rust 侧文案表（`crate::i18n`）而**不是**由前端传下来：理由同 `prompt_helper_gate`
+        // —— 本门的发起方包含 `startup_tasks::spawn_auto_connect` 与托盘原生菜单的 `tray_toggle`，
+        // 两条都没有前端在场，前端手上那份 i18next 递不进来。
+        use crate::i18n::{key, t};
+        let lang = crate::i18n::app_lang(&self.app);
+        let confirmed = self
+            .app
+            .dialog()
+            .message(t(lang, key::NATIVE_HELPER_UPGRADE_BODY))
+            .title(t(lang, key::NATIVE_HELPER_UPGRADE_TITLE))
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                t(lang, key::NATIVE_HELPER_UPGRADE_CONFIRM),
+                // 取消键是「直接继续」而**不是**「取消」：本腿不阻断起核，写「取消」会让用户以为
+                // 点了就不连接了 —— 按钮文案必须与真实后果一致（见 `NATIVE_HELPER_UPGRADE_SKIP`）。
+                t(lang, key::NATIVE_HELPER_UPGRADE_SKIP),
+            ))
+            .blocking_show();
+        if !confirmed {
+            log::info!("helper 可升级提示：用户选择直接继续 → 用现有 helper 起核");
+            return false;
+        }
+
+        // 就地授权升级（= 重装随包 helper；`HelperRuntime::install` 内部已含「弹一次系统授权 +
+        // 装后轮询 daemon 就绪」）。**失败不抛、不阻断**：起核照常继续，用户下次仍会在设置页
+        // 看到可升级卡片。这与 `prompt_helper_gate` 的未装腿刻意不同 —— 那条装不上就没核可起，
+        // 这条装不上还有一个能用的旧 helper。
+        match self.app.try_state::<crate::runtime::AppRuntime>() {
+            Some(rt) => {
+                let r = rt.helper().install();
+                if r.success {
+                    log::info!("helper 可升级提示：升级成功 → 继续起核");
+                } else {
+                    log::warn!(
+                        "helper 可升级提示：升级未成功（{}）→ 仍用现有 helper 继续起核",
+                        r.reason_for_log()
+                    );
+                }
+            }
+            // setup 前的极早期（AppRuntime 尚未 manage）：升不了，仍返回 true —— 用户确实选了升级，
+            // 谎报成「他选了直接继续」是伪造用户意图（同 `prompt_helper_gate` 的 None 腿）。
+            None => log::warn!("helper 可升级提示：AppRuntime 尚未装配 → 无法升级，仍继续起核"),
+        }
+        true
+    }
 }
 
 /// serde skip_if 助手：pid=0 时省略（对齐 上游 `pid?`）。
@@ -1122,6 +1207,18 @@ pub struct ProxyRuntime {
     /// SIGTERM/宽限腿。**不选「仅在 start 失败时复位门闩」**：起核成功后核也可能中途崩成孤儿
     /// （正是崩溃自愈路径），那条只覆盖失败腿，仍会漏掉同一类事故。
     stale_sweep_disabled: AtomicBool,
+    /// 「helper 可升级」提示的**一次性闸门**（`false` = 本进程尚未提示过）。
+    ///
+    /// [`run_helper_gate`](Self::run_helper_gate) 是**每次 TUN 起核**都要跑的汇流点（托盘切模式 /
+    /// 启动自动连接 / switchMode 去抖重启 / 崩溃自愈重启），而「可升级」是一条**一次性告知**、
+    /// 不是状态推送。不去重就是「每次重启弹一次原生模态」，比它要修的缺陷坏得多
+    /// （语义同 `startup_tasks::BASELINE_WARNED`）。
+    ///
+    /// **挂在运行时实例上而不是写成 `static`**：生产进程里 `AppRuntime` 只造一个 `ProxyRuntime`
+    /// （`runtime.rs` 的 `AppRuntime::new`），两者在生产上完全等价；而 `static` 在单测里是
+    /// **跨用例共享**的 —— 第一个跑到这条腿的用例把它领走，其余用例观测到的恒是「没弹」，
+    /// 于是「只弹一次」这条不变式**反而永远无法被证伪**（反向对照没有对象）。
+    helper_upgrade_prompted: AtomicBool,
     /// stale-core 清扫的**实跑次数**（诊断 + 「每次 start 都清」这条不变式的唯一可观测量）。
     ///
     /// 没有它，「门闩有没有退回一次性」只能靠读代码推理——而这正是本次事故里失守的那类推理。
@@ -1310,6 +1407,7 @@ impl ProxyRuntime {
             #[cfg(test)]
             ready_retry_count: Arc::new(AtomicU32::new(0)),
             stale_sweep_disabled: AtomicBool::new(false),
+            helper_upgrade_prompted: AtomicBool::new(false),
             stale_sweep_runs: AtomicUsize::new(0),
             custom_rule_files_degraded: AtomicBool::new(false),
             system_proxy: SystemProxyTakeover::new(proxy_clearer),

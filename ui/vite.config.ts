@@ -56,6 +56,10 @@ export default defineConfig({
     // 生产构建产物最小化（Tauri 打包体积敏感）
     minify: !process.env.TAURI_ENV_DEBUG ? 'oxc' : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // 主入口本就该是一整块：导航层刻意不做代码分割（理由见 `src/components/screens/ScreenRouter.tsx`
+    // 顶部）。默认 500kB 警告开口就建议「用 dynamic import 拆包」——在本项目里它推的正是刚被否掉的
+    // 方案，每次构建刷一遍只会把下一个人拉回原地。阈值抬到主包实际量级之上，让这条提示重新有信息量。
+    chunkSizeWarningLimit: 700,
 
     rollupOptions: {
       // 多入口：主窗（index）+ mini 更新弹窗（update-popup）+ 托盘自绘浮层（tray）。

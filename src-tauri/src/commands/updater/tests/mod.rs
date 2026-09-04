@@ -2750,3 +2750,187 @@ fn update_install_delegates_detached_spawn_to_completion_helper() {
         "QuitState 与 app.exit 均不得在 command helper 外直接执行"
     );
 }
+
+// ── 更新进度快照槽：切走再切回来不丢进度 ────────────────────────────────
+
+/// 本节共用的发布清单样本（字段取自真实 `update_check` 回包里被 `progress_manifest` 投影的那几个）。
+fn progress_info_sample() -> Value {
+    json!({
+        "version": "v1.2.0",
+        "fileSize": 52_000_000_u64,
+        "isPrerelease": false,
+        "fileName": "polaris-1.2.0.dmg",
+    })
+}
+
+/// 🟢 **槽里放的就是那一帧本身，且后写覆盖前写。**
+///
+/// 缺陷形态（用户报告）：更新下到一半，窗口切走再切回来，卡片退回 idle 显示「检查更新」。成因是
+/// 设置页的更新状态全在组件本地 state 里，重挂载后只能等下一帧 —— 而下载已下完时那一帧永不再来。
+/// 本槽是回读腿（`update_get_progress`）的唯一数据源。
+///
+/// **变异探针**：`set_last_progress` 改成「已有值就不覆盖」⇒ 第 3 条转红（槽停在 30%，
+/// 用户切回来看到的是早已过期的进度）；改成写入前先 `*g = None` 再判空 ⇒ 第 2 条转红。
+#[test]
+fn last_progress_slot_holds_the_frame_it_was_given_and_keeps_the_newest() {
+    let tmp = scratch("last-progress");
+    let rt = crate::runtime::updater::UpdaterRuntime::new(tmp.path().to_path_buf());
+    let info = progress_info_sample();
+
+    // 1. 一帧都没发过 ⇒ None。**不编造 idle 帧**：「没发过」与「处于 idle」是两回事，
+    //    回一个假 idle 会让 UI 把「不知道」误当成「知道且没在下」。
+    assert!(
+        rt.last_progress().is_none(),
+        "刚装配的运行时不得凭空有一帧进度"
+    );
+
+    // 2. 存进去的与同参 `progress_payload` 逐字段相等（emit_progress 存的正是这个值）。
+    let at30 = ProgressStage::Downloading {
+        percentage: 30,
+        received: 15_600_000,
+    };
+    rt.set_last_progress(progress_payload(&info, at30));
+    assert_eq!(
+        rt.last_progress().expect("存过一帧就该读得到"),
+        progress_payload(&info, at30),
+        "槽里的值与广播出去的载荷必须是同一份 —— 回读到的与刚收到的事件对不上就是新的不一致"
+    );
+
+    // 3. 后写覆盖前写：连发 30 → 70 之后槽里是 70 那一帧。
+    let at70 = ProgressStage::Downloading {
+        percentage: 70,
+        received: 36_400_000,
+    };
+    rt.set_last_progress(progress_payload(&info, at70));
+    let held = rt.last_progress().expect("覆盖之后仍应有值");
+    assert_eq!(held, progress_payload(&info, at70));
+    assert_eq!(held["percentage"], json!(70));
+    assert_eq!(
+        held["receivedBytes"],
+        json!(36_400_000),
+        "随行事实要跟着最新那一帧走，不能停在上一帧"
+    );
+}
+
+/// 🟢 **终态帧不清空。**
+///
+/// 这是本批的一条**决定**，不是疏漏：用户切走再切回来要看到的正是「下载完成了」。
+/// 终态帧后清空槽 = 卡片被打回 idle，那恰恰是本槽要修的缺陷本身。失败帧同理：切回来该看到
+/// 「失败了 + 重试」，而不是一个什么都没发生过的 idle。
+///
+/// **变异探针**：在 `set_last_progress` 里对 `Downloaded` / `Failed` 帧改存 `None` ⇒ 本条两格转红。
+#[test]
+fn last_progress_slot_keeps_terminal_frames_instead_of_clearing() {
+    let tmp = scratch("last-progress-terminal");
+    let rt = crate::runtime::updater::UpdaterRuntime::new(tmp.path().to_path_buf());
+    let info = progress_info_sample();
+    let path = std::path::Path::new("/var/tmp/updates/polaris-1.2.0.dmg");
+
+    let landed = ProgressStage::Downloaded {
+        path,
+        verified: true,
+    };
+    rt.set_last_progress(progress_payload(&info, landed));
+    let held = rt.last_progress().expect("落位帧之后槽里必须仍有值");
+    assert_eq!(held, progress_payload(&info, landed));
+    assert_eq!(held["status"], json!("downloaded"));
+    assert_eq!(
+        held["filePath"],
+        json!(path.to_string_lossy()),
+        "「重启并安装」拿的就是这个路径 —— 丢了它按钮就是哑键"
+    );
+
+    let failed = ProgressStage::Failed(UpdateErr::with_detail(
+        UpdateErrCode::DownloadFailed,
+        "net down",
+    ));
+    rt.set_last_progress(progress_payload(&info, failed));
+    let held = rt.last_progress().expect("失败帧之后槽里必须仍有值");
+    assert_eq!(held, progress_payload(&info, failed));
+    assert_eq!(held["status"], json!("error"));
+    assert_eq!(
+        held["errorCode"],
+        json!("downloadFailed"),
+        "切回来要看到「失败了 + 可重试」，不是一个什么都没发生过的 idle"
+    );
+}
+
+/// 🟡 **调用点守卫：`emit_progress` 只派生一次载荷，广播与快照存的是同一个值。**
+///
+/// 纯单测测不到（`emit_progress` 持 `AppHandle`，本仓未在 lib 单测里引 `tauri::test`）。守的是
+/// **第二份派生**这一形态：再调一次 `progress_payload(info, stage)` 存进槽，编译绿、上面两条行为门
+/// 也照样绿，而两份从此各算各的 —— 回读到的与刚收到的事件对不上正是本批要消掉的不一致。
+///
+/// 顺序（先存后播）同样钉住：反过来的话，收到事件的窗口立刻回读会读到**上一帧**。
+///
+/// **变异探针**：把 `set_last_progress(payload.clone())` 换成
+/// `set_last_progress(progress_payload(info, stage))` ⇒ 第 2 条转红（计数变 2）；
+/// 把那次存整段删掉 ⇒ 第 1 条转红；把存挪到 `broadcast` 之后 ⇒ 第 3 条转红。
+#[test]
+fn emit_progress_stores_the_very_payload_it_broadcasts() {
+    let body =
+        crate::commands::guard_scan::top_level_fn_body(src(), "pub(super) fn emit_progress(");
+    assert!(
+        body.contains("rt.updater().set_last_progress(payload.clone());"),
+        "发事件的唯一产地没有把这一帧留档 —— 设置页重挂载后就再也拿不到在途/已完成的下载"
+    );
+    // 值的**同一性**：广播出去的必须就是存进槽的那一个绑定。
+    //
+    // 上一版只断言了「`broadcast(` 出现在 `set_last_progress` 之后」——那守得住顺序，守不住
+    // 「播的和存的是不是同一份」：把 `broadcast` 的实参换成任意别的变量，顺序断言照样绿，而
+    // 回读到的与刚收到的事件从此各说各话，正是本槽要消掉的那类不一致。
+    //
+    // 两条正面断言把这条链钉死：`payload` 只由这一次派生产生（下面的计数保证没有第二次），
+    // 存进槽的是它，播出去的也是它。**不需要再配一条「禁止重新赋值」的负面断言**：`payload`
+    // 是不可变绑定，重新赋值编译不过，唯一的绕法是把 `let` 改成 `let mut`，而那会让下面
+    // 这条字面断言直接红。
+    assert!(
+        body.contains("let payload = progress_payload(info, stage);"),
+        "那一帧不再由**一次**派生绑定到 `payload` —— 存进槽的与播出去的从此可能是两份"
+    );
+    assert!(
+        body.contains("crate::events::channel::EVENT_UPDATE_PROGRESS, payload);"),
+        "广播的实参不再是 `payload` 这个绑定 —— 顺序断言拦不住这一档：\
+         播的和存的成了两份，回读到的与刚收到的事件对不上"
+    );
+    let derived = body.matches("progress_payload(").count();
+    assert_eq!(
+        derived, 1,
+        "`progress_payload(` 在 emit_progress 里出现 {derived} 次（只该是那条 `let payload =`）—— \
+         第二次调用就是第二份派生，与广播出去的那份从此各算各的"
+    );
+    let store = body
+        .find("set_last_progress")
+        .expect("上面已断言存在这一处");
+    let broadcast = body
+        .find("crate::events::broadcast(")
+        .expect("发事件的唯一产地必须仍在广播");
+    assert!(
+        store < broadcast,
+        "快照必须先于广播写入 —— 否则收到事件的窗口立刻回读会读到上一帧"
+    );
+}
+
+/// 🟡 **接线守卫：回读命令读的是这个槽，且 `None` 不被编造成 idle 帧。**
+///
+/// 命令壳持 `State<'_, AppRuntime>`，单测直调不了（本仓一贯做法，见 `update_skip` 一节）。
+///
+/// **变异探针**：把 `unwrap_or(Value::Null)` 换成 `unwrap_or(json!({"status":"idle"}))` ⇒ 第 2 条转红
+///（UI 会把「后端不知道」误当成「后端说没在下」，卡片被一个假态钉在 idle）。
+#[test]
+fn update_get_progress_returns_the_slot_and_never_fabricates_an_idle_frame() {
+    let body =
+        crate::commands::guard_scan::top_level_fn_body(src(), "pub async fn update_get_progress(");
+    assert!(
+        body.contains("state.updater().last_progress()"),
+        "回读腿必须读 emit_progress 写的那个槽，不得另起一份状态"
+    );
+    assert!(
+        body.contains("unwrap_or(Value::Null)"),
+        "一帧都没发过时必须如实返 null —— 编造 idle 帧就是拿假状态换掉「不知道」"
+    );
+    assert!(
+        !body.contains("\"status\""),
+        "回读腿不得自己拼装任何进度态：它只是把槽里的那一帧原样交出去"
+    );
+}

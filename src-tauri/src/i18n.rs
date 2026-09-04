@@ -452,6 +452,15 @@ pub mod key {
     pub const NATIVE_HELPER_REPAIR_BODY: &str = "native.helperRepairBody";
     /// 已装但不可用：确认按钮。
     pub const NATIVE_HELPER_REPAIR_CONFIRM: &str = "native.helperRepairConfirm";
+    /// 已装但**可升级**：标题（温和提示腿，不阻断起核）。
+    pub const NATIVE_HELPER_UPGRADE_TITLE: &str = "native.helperUpgradeTitle";
+    /// 已装但可升级：正文。
+    pub const NATIVE_HELPER_UPGRADE_BODY: &str = "native.helperUpgradeBody";
+    /// 已装但可升级：确认按钮（升级并继续）。
+    pub const NATIVE_HELPER_UPGRADE_CONFIRM: &str = "native.helperUpgradeConfirm";
+    /// 已装但可升级：取消按钮。**不是「取消」而是「直接继续」**——本腿不阻断起核，
+    /// 写「取消」会让用户以为点了就不连接了，按钮文案必须与真实后果一致。
+    pub const NATIVE_HELPER_UPGRADE_SKIP: &str = "native.helperUpgradeSkip";
     /// 取消按钮。
     pub const NATIVE_CANCEL: &str = "native.cancel";
 

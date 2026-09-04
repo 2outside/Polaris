@@ -10,7 +10,6 @@ import {
   updateApi,
   versionApi,
   type InstallAdvisory,
-  type UpdateProgress,
   type UpdateProgressManifest,
   type VersionInfo,
 } from '@/ipc/api-client';
@@ -19,8 +18,7 @@ import { markAppVersionSkipped } from '../../layout/app-update-banner';
 import {
   appDownloadIntegrity,
   isPortableZipUpdate,
-  progressResetsIntegrity,
-  updateCardPatch,
+  wireUpdateProgress,
   type AppDownloadIntegrity,
 } from './settings-logic';
 
@@ -69,22 +67,25 @@ export function useAppUpdate(includePrerelease: boolean) {
     void versionApi.getInfo().then(setAppVersionInfo).catch(() => undefined);
   }, []);
 
+  // 订阅 + 挂载期快照回读。顺序、竞态否决与「两条路共用同一个 reducer」都在 `wireUpdateProgress`
+  // 里（那里跑得进单测，这里跑不进）；本处只剩把一份 patch 摊到各 useState 上。
   useEffect(() => {
-    const off = updateApi.onProgress((p: UpdateProgress) => {
-      if (progressResetsIntegrity(p.status)) setDownloadIntegrity('unknown');
-      const patch = updateCardPatch(p);
-      if (!patch) return;
-      setUs(patch.us);
-      setUpdateInfo(patch.info);
-      setDownloadedPath(patch.path);
-      setReceivedBytes(patch.received);
-      setProgress(patch.percentage);
-      if (patch.errorCode !== null) {
-        setErrMsg(updateErrText(patch.errorCode, patch.errorDetail, t));
-      }
-      if (patch.integrity !== null) setDownloadIntegrity(patch.integrity);
+    return wireUpdateProgress({
+      subscribe: (onFrame) => updateApi.onProgress(onFrame),
+      readSnapshot: () => updateApi.getProgress(),
+      resetIntegrity: () => setDownloadIntegrity('unknown'),
+      applyPatch: (patch) => {
+        setUs(patch.us);
+        setUpdateInfo(patch.info);
+        setDownloadedPath(patch.path);
+        setReceivedBytes(patch.received);
+        setProgress(patch.percentage);
+        if (patch.errorCode !== null) {
+          setErrMsg(updateErrText(patch.errorCode, patch.errorDetail, t));
+        }
+        if (patch.integrity !== null) setDownloadIntegrity(patch.integrity);
+      },
     });
-    return off;
   }, []);
 
   async function checkUpdate() {

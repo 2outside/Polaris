@@ -22,7 +22,9 @@ use super::placement::{
 };
 use super::platform::focus_overlay;
 #[cfg(target_os = "macos")]
-use super::platform::{configure_nonactivating_overlay, remove_mouse_monitor};
+use super::platform::{
+    configure_nonactivating_overlay, install_screen_change_observer, remove_mouse_monitor,
+};
 use super::{TrayOverlay, TRAY_LABEL};
 
 /// 浮层页面入口（vite 多入口产物；dev 态由 devUrl 提供 `/tray.html`）。
@@ -258,12 +260,57 @@ fn build_overlay(app: &AppHandle, generation: u64) -> Option<tauri::WebviewWindo
     // （W13 的明暗信号源不挂这里：本窗限时存活——轻量转场与 120s 空闲回收都会销毁它；
     // Win 直读注册表真值、Linux 留窗口探测链，均见 main.rs 的 system_dark_bg。）
     let app_handle = app.clone();
-    win.on_window_event(move |event| {
-        if let WindowEvent::Focused(false) = event {
-            hide_overlay(&app_handle);
-        }
+    win.on_window_event(move |event| match event {
+        WindowEvent::Focused(false) => hide_overlay(&app_handle),
+        // 腿 B 的**跨平台**半边。tao 0.35.3 把 Windows 的 `WM_DPICHANGED` 与 macOS 的
+        // `windowDidChangeBackingProperties` 都归一到这一个事件 —— 也就是「混合 DPI 多显示器把窗
+        // 拖过去」那一档，而那正是 Windows 上最常见的形态（主屏 150% + 副屏 100%）。
+        //
+        // Windows 上它是**唯一**够得着的原生信号：`WM_DISPLAYCHANGE`（同 DPI 改分辨率、插拔显示器）
+        // 要自己 subclass 窗口过程才拿得到，那是给一条腿换一整套 UI 线程风险；那一半交给前端的
+        // media query 腿 —— WebView2 就是 Blink，本仓已在 Blink 上实测过（见
+        // `ui/src/tray/tray-menu-height.ts::screenMetricQueries`）。macOS 那一半由
+        // [`install_screen_change_observer`](super::platform::install_screen_change_observer) 兜。
+        //
+        // **不是正反馈环**：我们经 [`tray_resize`](super::commands::tray_resize) 改的是窗**尺寸**，
+        // 尺寸变化不产生 DPI 变化；本分支的触发源全在窗外（系统改缩放 / 窗被拖过 DPI 边界），
+        // 与 `Resized` / `Moved` 那两个「我们自己改出来的」事件在结构上不是一类。
+        WindowEvent::ScaleFactorChanged { .. } => notify_screen_change_remeasure(&app_handle),
+        _ => {}
     });
+    // macOS 的权威屏幕信号：`NSApplicationDidChangeScreenParametersNotification` 覆盖显示器增删、
+    // 分辨率、缩放与排布变化 —— 正是 `ScaleFactorChanged`（只跟 backing scale 走）够不着的那一半。
+    // mac 上这一半没有别人守：前端 media query 腿在 WKWebView 上未核实。
+    #[cfg(target_os = "macos")]
+    install_screen_change_observer(app);
     Some(win)
+}
+
+/// 屏幕参数变化时叫 renderer 重量一次窗高（腿 B 的**宿主**半边，三条触发源共用的出口）。
+///
+/// # 为什么由宿主推
+///
+/// 「屏幕参数变了」这件事只有系统知道。前端那条 `matchMedia` 腿在 Windows（WebView2 = Blink）上
+/// 已实测可用，在 macOS 的 WKWebView 上**未核实** —— 而它一旦沉默，用户看到的就是被裁掉底部
+/// 「退出」的菜单。故权威信号取平台原生的那一个，media query 降为廉价的次级触发。
+///
+/// # 为什么不是监听自己这个窗的 `Resized` / `Moved`
+///
+/// 窗尺寸正是我们经 [`tray_resize`](super::commands::tray_resize) 改的，监听它会形成
+/// 「改尺寸 → 收事件 → 重量 → 改尺寸」的正反馈环——[`TRAY_MAX_HEIGHT_LOGICAL`] 的注释里就记着
+/// 一次被 ResizeObserver 推到上限的实例。屏幕参数不是我们改的，结构上没有这个环。
+///
+/// # 窗不存在即 no-op
+///
+/// 屏幕换代与「用户想看菜单」无关，为一条状态通知去冷建 WebView 是净亏（`keepTrayMenuWarm=false`
+/// 时窗本来就该躺在回收态）；下一次展开的腿 A 本来就会量。
+pub(super) fn notify_screen_change_remeasure(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(TRAY_LABEL) else {
+        return;
+    };
+    // 走腿 A 那条**既有** eval 桥（[`show_ready_overlay`] 里的同一个全局），不新开 IPC 通道、
+    // 不新增第二个全局：这仍是一次单向、无载荷的通知，通道的注册/契约/双侧维护成本全是净亏。
+    let _ = win.eval("window.__POLARIS_TRAY_REMEASURE__?.();");
 }
 
 /// 把冷建排到托盘点击回调返回之后：W18 已证实 WebView 建/销不能跑在 OS 消息分发栈内；同一纪律
@@ -334,6 +381,15 @@ pub(super) fn show_ready_overlay(app: &AppHandle, win: &tauri::WebviewWindow) {
         return;
     }
     reposition(win);
+    // 每次展开都叫 renderer 重量一次窗高。缺了这句，前端那把「首次量到就锁死」的高度锁会活到整个
+    // 进程结束：`keepTrayMenuWarm` 默认开启 ⇒ 日常隐藏只收起浮层、不回收 WebView，而本函数其余动作
+    // （reposition / show / focus）一个字节都没往 renderer 送 —— 温着的 WebView 被重新显示时前端
+    // 毫不知情。于是首次量偏矮（字体/i18n 资源尚未落定）就一直矮下去，菜单内部滚动、排在最底下的
+    // 「退出」要往下拉才看得见；中途改了分辨率或换屏则可能反过来高得超出屏幕，连滚都够不到。
+    // 排在 `win.show()` **之后**：隐藏态 WebView 量到的仍是上一次展开的布局。
+    // 走既有 eval 桥（同 `hide_overlay` 里的 `__POLARIS_NATIVE_HOVER__`）而不新开 IPC 通道 ——
+    // 这是一次单向、无载荷的通知，通道的注册/契约/双侧维护成本全是净亏。
+    let _ = win.eval("window.__POLARIS_TRAY_REMEASURE__?.();");
     focus_overlay(win);
     log_open_probe(app, "shown", true);
 }

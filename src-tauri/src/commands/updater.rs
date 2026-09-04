@@ -4,7 +4,7 @@
 //!
 //! | command | 状态 |
 //! |---|---|
-//! | `version_get_info` / `update_check` / `update_download` / `update_install` / `update_skip` / `update_open_releases` | ✅ 真实现 |
+//! | `version_get_info` / `update_check` / `update_download` / `update_get_progress` / `update_install` / `update_skip` / `update_open_releases` | ✅ 真实现 |
 //! | `update_popup_*` | ✅ 真实现 |
 //! | `core_update_check` / `core_update_run` / `core_get_version_info` / `core_rollback` / `core_replace_manual` / `core_reset_factory` / `core_update_apply_staged` / `core_update_get_auto_status` / `core_update_ack_version_change` | ✅ 真实现 |
 //! | `app_uninstall_all` | ✅ 真实现（编排见 [`crate::runtime::uninstall`]；三平台可行性逐项如实标注） |
@@ -50,8 +50,8 @@ mod shared;
 mod uninstall_command;
 
 pub use app_update::{
-    update_check, update_download, update_install, update_open_releases, update_popup_action,
-    update_popup_show, update_skip, version_get_info,
+    update_check, update_download, update_get_progress, update_install, update_open_releases,
+    update_popup_action, update_popup_show, update_skip, version_get_info,
 };
 pub use core_update::{
     core_get_version_info, core_replace_manual, core_reset_factory, core_rollback,
@@ -67,7 +67,7 @@ pub(crate) use app_update::{
 };
 pub(crate) use app_update_policy::app_update_channel_is_prerelease;
 pub(crate) use core_update::{
-    core_update_apply_staged_auto, extract_core_bytes, staged_core_sha_path,
+    core_update_apply_staged_auto, core_update_size_limit, extract_core_bytes, staged_core_sha_path,
 };
 #[cfg(test)]
 use shared::github_status_error;

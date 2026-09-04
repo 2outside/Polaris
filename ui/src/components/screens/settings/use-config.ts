@@ -30,6 +30,17 @@
  * 直落盘键时会把前一次暂存的键一起写进 config.json（与本文件自称的 FR-1「零磁盘写」相悖）。
  * 基准改成纯磁盘副本后，落盘的那份只含 `direct`。总开关关着时 `direct === patch`、`staged` 恒空、
  * `effectiveConfigOf` 返回入参本体 ⇒ 整条腿与今天逐字节等价。
+ *
+ * **首帧不转圈（本轮）**：`loading` 的初值过去恒为 `true` ⇒ 每次进设置页都先闪一屏 Spinner。而
+ * app-store 早就持有同一份磁盘副本（`loadConfig` 存进 store 的就是 `config.get()` 的**原始返回**，
+ * 启动期已拉好），设置页那次自拉只是「对齐磁盘最新值」，不是「第一次知道配置长什么样」。故首帧
+ * 拿 `useAppStore.getState().config` 当种子，挂载那次 `config.get()` 降级成 `silent` 重拉（不动
+ * loading/error，复用 [`load`] 里事件驱动那条腿）。
+ *
+ * 种子必须取 store 里那份**原始** config，**不是** `effectiveConfigOf(...)` 的结果：本 hook 的 state
+ * 是磁盘副本，把暂存值烧进去就回到上一段刚修掉的那条渗漏（且会被 `onChanged` 的整份重拉抹掉）。
+ * store 为 `null` 时原样回落到「`loading=true` → 拉取 → 渲染」—— 设置页并非只能从首页进（托盘
+ * 「打开设置」、启动即进 settings scope 都可达），store 未必已 hydrate。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -113,7 +124,9 @@ export interface UseConfigResult {
   config: UserConfig | null;
   loading: boolean;
   /**
-   * **仅**加载失败（显式 reload / 首次挂载拉取）。保存失败不写这里 —— 见 `update` 的注释：
+   * **仅**加载失败，且**仅**在阻塞腿上（显式 reload / 无种子时的首次挂载拉取）—— 有种子时挂载那次
+   * 走 silent，拉失败就继续显示种子那份，不该把一屏可用的设置换成错误屏。保存失败也不写这里，
+   * 见 `update` 的注释：
    * 消费方（SettingsPage）用本字段决定「整屏塌成错误屏」，保存失败塌屏会把用户正在编辑的表单卸载掉。
    */
   error: string | null;
@@ -126,6 +139,30 @@ export interface UseConfigResult {
   reload: () => Promise<void>;
 }
 
+/** [`configFirstFrame`] 的返回 —— 与 `useConfig` 首帧那两个 `useState` 的初值一一对应。 */
+export interface ConfigFirstFrame {
+  /** 本 hook 自持的**磁盘副本** state 的初值。 */
+  config: UserConfig | null;
+  /** `loading` 的初值。 */
+  loading: boolean;
+}
+
+/**
+ * 首帧决策：app-store 里已 hydrate 的那份直接当种子 ⇒ `loading` 首帧即 `false`，转圈**结构上**不出现
+ * （不是「更快了」，是那一帧压根不存在）。
+ *
+ * 抽成纯函数不是为了复用（调用点只有下面 `useConfig` 一处），是为了**可测**：本仓 vitest 跑 node
+ * 环境、刻意不装 jsdom（见 `vite.config.ts` test 段），真 hook 一行都跑不起来，而这次要守的恰恰就是
+ * 「首帧那两个初值是什么」。同款做法见 `settings-logic.ts` 的 `wireUpdateProgress` 与
+ * `tray/tray-menu-height.ts`。
+ *
+ * 入参口径写死为**磁盘副本**（生产侧传 `useAppStore.getState().config`）：喂
+ * `effectiveConfigOf(...)` 的结果会把暂存值烧进磁盘副本，理由见头注。`null` ⇒ 回落今天的行为。
+ */
+export function configFirstFrame(hydrated: UserConfig | null): ConfigFirstFrame {
+  return { config: hydrated, loading: hydrated === null };
+}
+
 export function useConfig(): UseConfigResult {
   const { t } = useTranslation();
   // 暂存闸门的两个入参。开关取 store 而非编译期常量：`editRoute` 判的就是它，两处不同源会造出「半开」态。
@@ -133,9 +170,14 @@ export function useConfig(): UseConfigResult {
   const stage = useStagedConfigStore((s) => s.stage);
   /** 暂存条目。**订阅**而非快照读：撤销一条（popover 逐项撤销）也要让设置页当场退回磁盘值。 */
   const stagedEntries = useStagedConfigStore((s) => s.entries);
+  /**
+   * 首帧种子（见头注「首帧不转圈」）。惰性初值 ⇒ 只在挂载那一帧读一次 store 快照：之后本 hook 的
+   * 磁盘副本只由自己的 `load` / `update` 维护，store 再变也不回灌（两份副本各自订阅同一个广播）。
+   */
+  const [seed] = useState(() => configFirstFrame(useAppStore.getState().config));
   /** **磁盘副本**（不含暂存值）—— 见头注「暂存回显的收口点」。落盘基准与 U-7 差集都取它。 */
-  const [config, setConfig] = useState<UserConfig | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [config, setConfig] = useState<UserConfig | null>(seed.config);
+  const [loading, setLoading] = useState(seed.loading);
   const [error, setError] = useState<string | null>(null);
   /**
    * 代际计数（对齐 app-store.loadConfig 的同款守卫）：每次本地 update 自增，使**在飞的旧 get** 回填
@@ -154,8 +196,17 @@ export function useConfig(): UseConfigResult {
    *
    * 与 state 的一致性：**所有** `setConfig` 调用点都必须同步改这里（load 回填 / update 乐观写 / 失败回滚），
    * 少改一处就会拿陈旧 base 去合成 patch。同 state，它装的是**磁盘副本**，不含暂存值。
+   * 初值同样取种子：`update` 首行是 `if (!prev) return`，ref 若还停在 `null`，首帧就动手改设置会被
+   * **静默丢掉**（而界面上那个开关已经因为有种子而可点了）。
    */
-  const latestConfig = useRef<UserConfig | null>(null);
+  const latestConfig = useRef<UserConfig | null>(seed.config);
+  /**
+   * 「本 hook 自己回填过至少一次」。下面 U-7 的第二条腿过去拿「`prev` 为空」当这件事的判据，而首帧
+   * 种子进来之后 `prev` 恒非空 —— 挂载那次静默重拉会拿 **store 那份**与刚读回的磁盘那份比一次，
+   * 两份在 store 还没跟上某次写盘的那个窗口里会差出一个需重启键，弹出一个凭空的重启弹窗。
+   * 判据换成这件事本身，与种子在不在无关。
+   */
+  const filledOnce = useRef(false);
   /**
    * `t` 的同步镜像。`load` 的依赖数组必须保持为空（它被挂载 effect 与事件订阅 effect 共同依赖，
    * 一旦随 `t` 重建，切换语言会连带重拉配置并重挂订阅），但下面的重启提示又需要当前语种的文案。
@@ -195,6 +246,8 @@ export function useConfig(): UseConfigResult {
       // 期间发生过本地写 → 本次回填必是旧快照，丢弃（本地乐观值更新，且那次写自己的回声会再来一趟）。
       if (mine !== generation.current) return;
       const prev = latestConfig.current;
+      const firstFill = !filledOnce.current;
+      filledOnce.current = true;
       latestConfig.current = cfg;
       setConfig(cfg);
       /**
@@ -204,15 +257,16 @@ export function useConfig(): UseConfigResult {
        * 压根不走 `update` ⇒ 只在 `update` 里判会让「导入一份备份把硬件加速关了」完全静默。
        * 托盘写入、后端自愈同理，故判据挂在**广播回声**这条汇流腿上，而不是逐个入口去补。
        *
-       * 三处防重：① 只在 `silent`（事件驱动）路径判 —— 显式 reload / 首次挂载不是「有人改了配置」；
-       * ② `prev` 为空（首次回填）不判，否则一进设置页就按默认值比一次；
+       * 三处防重：① 只在 `silent`（事件驱动）路径判 —— 显式 reload 不是「有人改了配置」；
+       * ② **首次回填**不判（`firstFill`）—— 一进设置页那次拉取同样不是。判据不能再用「`prev` 为空」
+       *    代替：首帧种子进来之后 `prev` 恒非空，那样会拿 store 那份去比一次（见 `filledOnce`）；
        * ③ 本 hook 自己的 `update` 已乐观把 `latestConfig` 写成 `next`，其回声到达时差集为空 ⇒
        *    不会与 `update` 末尾那次提示重复弹。
        *
        * 判据用 `appRestartRequiredDiff` 而非 `appRestartRequiredChanges`：两边都是完整 config，
        * 键缺席意味着「取默认值」而不是「本次没碰」（见该函数注释）。
        */
-      if (silent && prev) {
+      if (silent && prev && !firstFill) {
         const externalKeys = restartKeysStillPending(
           appRestartRequiredDiff(prev, cfg),
           startupFlags.current,
@@ -232,8 +286,10 @@ export function useConfig(): UseConfigResult {
   const reload = useCallback(() => load(false), [load]);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    // 有种子 ⇒ 这次拉取只是「对齐磁盘最新值」，走 silent 腿（不动 loading/error），否则会把已经能
+    // 显示的一屏打回 Spinner —— 那正是本轮要消掉的那次转圈。没种子才走阻塞腿（今天的行为）。
+    void load(seed.config !== null);
+  }, [load, seed]);
 
   // 别处改了 config（托盘切模式/切节点、其它屏保存、后端自愈）→ 静默重拉。
   // Settings 这份 config 是**独立于 app-store 的第二副本**（本 hook 自持 state），不订阅就会一直

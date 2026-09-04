@@ -402,6 +402,9 @@ pub struct HelperRuntime {
     /// `start_core` 的测试也必须被结构性禁止连接真实 socket。
     #[cfg(test)]
     never_connect: bool,
+    /// **测试专用**：把 [`Self::status`] 钉成给定快照，见 `Self::with_forced_status_for_tests`。
+    #[cfg(test)]
+    status_override: Option<HelperStatusSnapshot>,
 }
 
 impl HelperRuntime {
@@ -413,6 +416,8 @@ impl HelperRuntime {
             sys_ops: Arc::new(|| Box::new(StdSysOps)),
             #[cfg(test)]
             never_connect: false,
+            #[cfg(test)]
+            status_override: None,
         }
     }
 
@@ -456,6 +461,27 @@ impl HelperRuntime {
             platform: Platform::current(),
             sys_ops: Arc::new(|| Box::new(NeverInstalled)),
             never_connect: true,
+            status_override: None,
+        }
+    }
+
+    /// **测试专用**构造：在 [`Self::never_installed_for_tests`] 的全部隔离之上，再把
+    /// [`Self::status`] 钉成给定快照。
+    ///
+    /// # 为什么必须有这个
+    ///
+    /// 「helper 已装但可升级」这一格在本机**造不出来**：`never_installed_for_tests` 的 `SysOps`
+    /// 替身恒报未装，而换成真 `StdSysOps` 就等于让单测去读宿主真实安装态并连特权 daemon 的 socket
+    /// （那正是 `never_installed_for_tests` 存在的理由）。没有这个注入口，
+    /// `run_helper_gate` 的「已装但可升级」腿就只有源码级断言、没有任何运行期证据。
+    ///
+    /// **只钉读取面，不放开任何写入面**：`sys_ops` 仍是 `NeverInstalled`、`never_connect` 仍为 true
+    /// ⇒ `install`/`uninstall`/`start_core` 一律触不到真实系统（本条注入不构成新的宿主逃逸面）。
+    #[cfg(test)]
+    pub(crate) fn with_forced_status_for_tests(dir: PathBuf, status: HelperStatusSnapshot) -> Self {
+        Self {
+            status_override: Some(status),
+            ..Self::never_installed_for_tests(dir)
         }
     }
 
@@ -527,6 +553,12 @@ impl HelperRuntime {
     /// （`helper_get_status` spawn_blocking），不冻 UI。
     #[must_use]
     pub fn status(&self) -> HelperStatusSnapshot {
+        // 测试注入的钉死快照（`with_forced_status_for_tests`）。**必须在最前**：本方法余下的每一步
+        // 都会去读系统面，而注入的全部意义就是不读它。
+        #[cfg(test)]
+        if let Some(forced) = &self.status_override {
+            return forced.clone();
+        }
         let supported = self.supported();
         if !supported {
             return HelperStatusSnapshot {

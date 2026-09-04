@@ -61,17 +61,21 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 对付 slow-loris / 半死连接：整请求超时管不了「一直有数据但极慢」，idle 才管得了「彻底没数据」。
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// **内存型**下载的体积硬闸（16 MiB）。核二进制 ~10MiB 量级；超此即拒，防 OOM。
+/// [`CoreDownloader`] 构造时的**缺省**体积闸（16 MiB）。
 ///
-/// # 它是「内存闸」，不是「文件闸」
+/// # 它只是缺省值，**不是任何一条生产腿的闸**
 ///
-/// 两条内核腿（手动换核 / 自动换核）走的是 `download` → `Vec<u8>` → 解归档，字节全程在堆上，
-/// 故上限就该按**内存**定。App 安装包腿改成流式落盘后内存占用与包体积解耦，再拿 16 MiB 卡它
-/// 只会把所有正常安装包拒之门外 —— 那条腿的闸值改由调用方按「清单声明大小 + 裕度」注入
-/// （见 [`CoreDownloader::with_max_bytes`]）。
+/// 三条生产腿的闸全部由调用方按腿注入（[`CoreDownloader::with_max_bytes`]）：
+/// 两条内核腿按 GitHub 资产声明体积派生、封顶 128 MiB
+/// （`commands::updater::core_update::core_update_size_limit`），
+/// App 安装包腿按清单声明体积派生、封顶 512 MiB。
 ///
-/// `pub(crate)`：三个 `updater_downloader` 调用点里的两条内核腿要**逐字传这个值**
-/// （语义与形参化之前完全一致）；各写一份字面量必然漂移。
+/// 曾经两条内核腿逐字传它 —— 那是个 **P0**：sing-box 官方归档全部 26 MiB 以上，
+/// 每一次在线换核都会被 [`CoreDownloader`] 那个 `open_download_response` 的 Content-Length
+/// 预检早拒；之所以一直没暴露，只因随包内核版本恰好等于官方最新、`is_newer` 恒 false。
+/// 谁再想把某条腿改回传它，先量一眼上游今天的资产体积。
+///
+/// `pub(crate)`：内核腿的门要拿它作**反向对照**（证明真实资产体积在这个闸下无一过得去）。
 pub(crate) const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// 下载路径的重定向上限（GitHub release 资产必然 302 到 objects.githubusercontent.com）。
@@ -799,16 +803,16 @@ pub struct CoreDownloader {
     handle: tokio::runtime::Handle,
     /// gh 加速前缀（如 `https://ghproxy.net/`）；空 = 不用镜像。
     gh_proxy_prefix: String,
-    /// 单次下载体积硬闸。默认 [`MAX_DOWNLOAD_BYTES`]（内存腿口径），由
-    /// [`Self::with_max_bytes`] 按腿覆盖。
+    /// 单次下载体积硬闸。默认 [`MAX_DOWNLOAD_BYTES`]（仅缺省值），**每条生产腿都由
+    /// [`Self::with_max_bytes`] 显式覆盖**。
     max_bytes: usize,
 }
 
 impl CoreDownloader {
     /// 新建。`handle` 须是活着的 tokio runtime handle（command 层 `Handle::current()`）。
     ///
-    /// 体积闸默认取 [`MAX_DOWNLOAD_BYTES`]（= 形参化之前的行为）；流式落盘腿须显式
-    /// [`Self::with_max_bytes`] 覆盖。
+    /// 体积闸默认取 [`MAX_DOWNLOAD_BYTES`]；**三条生产腿全部**显式
+    /// [`Self::with_max_bytes`] 覆盖（那个缺省值容不下今天任何一个官方资产）。
     #[must_use]
     pub fn new(http: Arc<HttpRuntime>, handle: tokio::runtime::Handle) -> Self {
         Self {
@@ -829,8 +833,9 @@ impl CoreDownloader {
     /// 覆盖单次下载的体积硬闸。
     ///
     /// **闸值属于「这一腿下多大的东西」，不属于传输层**：内核腿把整包收进内存（`Vec<u8>`）
-    /// ⇒ 闸就是内存闸，恒取 [`MAX_DOWNLOAD_BYTES`]；App 安装包腿流式落盘 ⇒ 内存不随包体积长，
-    /// 闸改由「清单声明大小 + 裕度」注入。写死一个常量给两条腿共用，必然是「要么卡死大安装包、
+    /// ⇒ 闸是**内存**闸；App 安装包腿流式落盘 ⇒ 内存不随包体积长，它的闸管的是盘。
+    /// 两条腿各自按「服务端声明的体积」注入，再各自封在自己那个上限之下（128 MiB / 512 MiB）——
+    /// 两个上限约束的是不同的物理资源，合并成一个常量必然是「要么卡死大安装包、
     /// 要么给换核腿开一个 OOM 口子」二选一。
     #[must_use]
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {

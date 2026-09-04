@@ -131,6 +131,18 @@ pub struct UpdaterRuntime {
     core_binary: Mutex<Option<PathBuf>>,
     /// mini 更新弹窗会话（None = 弹窗未开）。
     popup: Mutex<Option<PopupSession<TauriPopupTransport>>>,
+    /// 本次进程发出的**最后一帧** App 更新进度（`update:progress` 的原样载荷）。
+    ///
+    /// 设置页的更新卡状态全在组件本地 state 里，初值 idle。窗口销毁重建 / 切页 / 轻量模式回收之后
+    /// 它对在途下载一无所知，只能等下一帧事件 —— 而下载**已经下完**时那一帧永不再来，卡片就永远
+    /// 停在「检查更新」。下载本身跑在 `spawn_blocking`，窗口没了照跑，故「进度还在、UI 却不知道」
+    /// 是常态而非边角；弹窗侧的 `popup` 槽兜不住它（`push_popup_state_inner` 在弹窗未开时直接返回，
+    /// 用户只在设置页操作的那条路径上一帧都不留）。
+    ///
+    /// **只在内存、不落盘。** 进程重启后在途残件已被 `PartialDownload` 的 RAII Drop 清掉，成品则会被
+    /// `cached_download_is_reusable` 那条复用腿重新认出来 —— 两种情形都不需要这份快照。而快照若落盘，
+    /// 重启后 UI 会照着它说「下载中 47%」，此刻却没有任何下载在跑：那是拿一个假状态换掉一个真状态。
+    last_progress: Mutex<Option<serde_json::Value>>,
     /// 内存态状态缓存（避免每次读盘；写时同步落盘）。
     state: Mutex<UpdateStateFile>,
 }
@@ -158,6 +170,7 @@ impl UpdaterRuntime {
                     .flatten(),
             ),
             popup: Mutex::new(None),
+            last_progress: Mutex::new(None),
             state: Mutex::new(state),
         }
     }
@@ -300,6 +313,25 @@ impl UpdaterRuntime {
             .ok()?
             .as_ref()
             .and_then(|s| s.last_state().cloned())
+    }
+
+    // ── 最后一帧进度快照（成因、以及为什么不落盘，见 `last_progress` 字段文档）──
+
+    /// 记下最后一帧进度。**终态帧（`downloaded` / `error`）同样留着，不清空** —— 用户切走再切回来
+    /// 时要看到的正是「下载完成了」，清空只会把卡片打回 idle，那恰恰是本槽要修的那个缺陷本身。
+    pub fn set_last_progress(&self, payload: serde_json::Value) {
+        if let Ok(mut g) = self.last_progress.lock() {
+            *g = Some(payload);
+        }
+    }
+
+    /// 最后一帧进度快照。
+    ///
+    /// 返回 `None` = 本次进程一帧都没发过（**不编造 idle 帧**：没发过与「处于 idle 态」是两回事，
+    /// 同 [`Self::popup_state`] 的理由）。
+    #[must_use]
+    pub fn last_progress(&self) -> Option<serde_json::Value> {
+        self.last_progress.lock().ok()?.clone()
     }
 }
 

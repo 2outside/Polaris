@@ -31,6 +31,7 @@
     "installingDesc": "等待一次性管理员授权…",
     "upgradeDescCard": "已安装的 helper 版本与当前应用不一致，需一次管理员授权完成同步升级",
     "upgradeHelperAction": "升级提权助手（需授权）",
+    "upgradeToastAction": "去升级",
     "btmTitle": "后台运行被禁用 (BTM)",
     "btmDesc": "macOS 阻止了后台项，请在“系统设置 › 通用 › 登录项与扩展”中允许，或回退到异常自动恢复",
     "loginItemsPath": "系统设置 › 通用 › 登录项与扩展",

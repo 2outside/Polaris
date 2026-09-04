@@ -25,10 +25,16 @@ pub(crate) fn core_base_dir<T>() -> Result<&'static std::path::Path, ApiResponse
 ///
 /// # `max_bytes` 为什么是形参
 ///
-/// 三条生产腿的体积闸**语义不同**：两条内核腿把整包收进 `Vec<u8>` 再解归档 ⇒ 闸是**内存闸**，
-/// 恒传 [`MAX_DOWNLOAD_BYTES`](crate::runtime::http::MAX_DOWNLOAD_BYTES)（16 MiB，与形参化之前逐字一致）；App 安装包腿改成流式落盘后
-/// 内存不随包体积长 ⇒ 16 MiB 只会把所有正常安装包拒掉，闸改由「清单声明大小 + 裕度」注入
+/// 三条生产腿的体积闸**语义不同**，且**上限各自成立**：两条内核腿把整包收进 `Vec<u8>` 再解归档
+/// ⇒ 闸是**内存闸**，按 GitHub 声明的资产体积注入、封顶 128 MiB
+/// （见 [`core_update_size_limit`](super::core_update::core_update_size_limit)）；App 安装包腿
+/// 流式落盘 ⇒ 内存不随包体积长，闸只管「别把盘写满」，封顶 512 MiB
 /// （见 [`app_update_size_limit`](super::app_update::app_update_size_limit)）。
+/// 两个上限不可合并成一个常量：一个约束的是堆，另一个约束的是盘。
+///
+/// [`crate::runtime::http::MAX_DOWNLOAD_BYTES`]（16 MiB）只剩
+/// [`CoreDownloader`] 的构造默认这一个身份 —— 官方
+/// sing-box 资产全部 26 MiB 以上，任何一条内核腿传它都等于「在线换核恒被预检早拒」。
 ///
 /// 选形参而非「再开一个构造入口」：gh 前缀读法只该有一份。两个入口意味着有一天 App 腿
 /// 读不到用户配的镜像前缀，而没有任何测试会发现。

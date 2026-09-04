@@ -788,6 +788,77 @@ export function updateCardPatch(p: UpdateProgress): UpdateCardPatch | null {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
+ * 挂载期接线：先订阅、后回读快照（切走再切回来不丢进度）
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * [`wireUpdateProgress`] 的四条外部接线。
+ *
+ * 注入而不是在函数里直接摸 `updateApi` / `useState`：接线本身（顺序、竞态否决）才是这次要守住的
+ * 东西，而它在真 hook 里跑不进单测（本仓 vitest 是 node 环境，无 DOM ⇒ 跑不了 effect）。
+ */
+// 不导出：引用面只有下面 `wireUpdateProgress` 的签名一处（测试构造对象字面量、不引类型名）。
+// 具名而不内联进签名，是为了让这四条成员各自的契约注释有地方待——尤其 `readSnapshot` 的
+// 「`null` ≠ idle 帧」，那正是回读腿与事件腿唯一的语义差别。
+interface UpdateProgressWiring {
+  /** 订阅 `update:progress`，返回退订闭包。 */
+  subscribe: (onFrame: (p: UpdateProgress) => void) => () => void;
+  /** 回读后端最后一帧；`null` = 后端一帧都没发过（**不是** idle 帧，见后端 `update_get_progress`）。 */
+  readSnapshot: () => Promise<UpdateProgress | null>;
+  /** 本帧要求把摘要校验结论清回 `unknown`；判据是 [`progressResetsIntegrity`]。 */
+  resetIntegrity: () => void;
+  /** 本帧落到更新卡上的全部改动；被 [`updateCardPatch`] 判为 `null` 的帧到不了这里。 */
+  applyPatch: (patch: UpdateCardPatch) => void;
+}
+
+/**
+ * 把更新卡接上 `update:progress`：**先订阅、后回读快照**，回读结果被「已收到过事件」一票否决。
+ *
+ * # 为什么光订阅不够
+ *
+ * 卡片状态全在组件本地，初值 idle。组件重挂载（切页 / 窗口销毁重建 / 轻量模式回收）之后，只订阅
+ * 事件的话它对在途下载一无所知，只能等下一帧；而下载**已经下完**时那一帧永不再来 —— 卡片就永远
+ * 停在「检查更新」，用户刚下完的那份包在 UI 上凭空消失。下载跑在后端 `spawn_blocking`，窗口没了
+ * 照跑，故这是常态而非边角。
+ *
+ * # 为什么顺序必须是「先订阅、后回读」
+ *
+ * 反过来会漏掉**两者之间**到达的那一帧：它发生时订阅还没建立，而回读拿到的快照比它旧 ——
+ * 那一帧就此丢失且补不回来。
+ *
+ * # 为什么回读结果要被事件一票否决
+ *
+ * 回读是异步的，它描述的是**发起那一刻**，必然不比订阅期间已收到的事件新。不否决的话，
+ * 「订阅先收到 downloaded、回读随后返回更旧的 downloading 47%」会把已经完成的下载倒退回进度条。
+ * 标志放在**本次接线的闭包里**（而不是组件级 ref）：重新接线即自动归零，它问的正是「自**这次**
+ * 订阅以来有没有收到过事件」；跨接线残留的 ref 会让新订阅的回读被上一次的事件否决掉。
+ *
+ * 两条路共用同一个 [`updateCardPatch`]（本函数里只有这一处调用点）——回读路径上另写一份
+ * 「帧 → 卡片」映射，两份必然漂，而漂出来的形态恰恰是「同一次下载在两条路上显示成两个样子」。
+ */
+export function wireUpdateProgress(w: UpdateProgressWiring): () => void {
+  const applyFrame = (p: UpdateProgress): void => {
+    if (progressResetsIntegrity(p.status)) w.resetIntegrity();
+    const patch = updateCardPatch(p);
+    if (patch) w.applyPatch(patch);
+  };
+  let sawEvent = false;
+  const off = w.subscribe((p) => {
+    sawEvent = true;
+    applyFrame(p);
+  });
+  void w
+    .readSnapshot()
+    .then((snapshot) => {
+      if (sawEvent || !snapshot) return;
+      applyFrame(snapshot);
+    })
+    // 回读失败不该影响已经建好的订阅：拿不到快照 = 退回「只有事件」的老行为，不是错误态。
+    .catch(() => undefined);
+  return off;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
  * 暂存条目的**段级**译名（原型 `settingLabel:4257`）
  * ──────────────────────────────────────────────────────────────────────────── */
 

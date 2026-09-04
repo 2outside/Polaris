@@ -31,7 +31,7 @@ import { useTailscaleLoginCacheStore } from './store/use-tailscale-login-cache-s
 import { subscribeSpeedTestProgressToast } from './lib/speedtest-progress-toast';
 import { useSystemProxyLivePolling } from './store/use-system-proxy-live';
 import { api } from './ipc';
-import { unlockApi } from './ipc/api-client';
+import { helperApi, unlockApi } from './ipc/api-client';
 import { toast } from './lib/error-handler';
 import { useIdlePrivacyLock } from './lib/use-idle-privacy-lock';
 import { initTooltips } from './lib/tooltip-engine';
@@ -44,6 +44,7 @@ import { isDefinitiveTsLoginFrame } from './domain/tailscale-conn-state';
 import AppShell from './components/layout/AppShell';
 import { createOnceGate } from './components/screens/settings/settings-logic';
 import { useDialogStore } from './components/dialogs/dialog-store';
+import { useNavStore } from './store/nav-store';
 import { useVpnStatusStore } from './store/use-vpn-status-store';
 import type { VpnStatusSnapshot } from './contracts/vpn-status';
 import {
@@ -58,6 +59,15 @@ import { openTrackedSubscriptionCreateRecovery } from './store/subscription-crea
  * `let coreBaselineWarnedThisSession = false`。
  */
 const coreBaselineWarnGate = createOnceGate();
+
+/**
+ * 「提权助手可升级」提示的每会话一次闸门。**必须是模块级单例**（同 `coreBaselineWarnGate` 的理由：
+ * 挂在组件内的 `useRef`/`state` 会随 App 重挂 —— 轻量模式返回 / window 重建 —— 复位，等于没去重）。
+ *
+ * 本腿尤其需要它：触发源有**两个**（后端事件 + 挂载回读），二者必然重叠，没有闸门就是同一件事
+ * 弹两条 toast。
+ */
+const helperUpgradeToastGate = createOnceGate();
 const UNOWNED_TAILSCALE_AUTH_KEY = '__unowned__';
 
 function ensureVpnAuthDialog(protocol: 'openconnect' | 'openvpn', serverId: string): void {
@@ -111,6 +121,50 @@ function pullPendingChanges(): void {
       })
     )
     .catch(() => {});
+}
+
+/**
+ * 「提权助手可升级」→ 全局可操作 toast（腿 B 的全部判定与副作用，抽成具名导出供单测直断言，
+ * 不必整棵渲染 App —— 同 `handleProxyErrorEvent` 的形态）。
+ *
+ * # 为什么主窗必须自己有一个消费者
+ *
+ * `EVENT_HELPER_UPGRADEABLE` 的行内契约写的就是「渲染端 toast 引导升级」，但全仓唯一的订阅者是
+ * **设置›助手页**（`SettingsHelper.tsx`）的页面级订阅 —— `ScreenRouter` 是裸 `switch`、无 keep-alive，
+ * 用户不站在那一页时组件根本没挂载，没有任何人在听。于是「助手该升级了」这件事只有主动点开那一页
+ * 才会被发现（真机反馈）。**一个状态只以事件形态广播、且唯一消费者是页面级的，就等于没有消费者。**
+ *
+ * # 去重闸门为什么在这里、而不是在 effect 里
+ *
+ * 触发源有两个（事件 + 挂载回读，见下方 effect 的注释），且 App 可能重挂 ⇒ 判定与去重必须在同一处
+ * 收口，否则两条腿各弹一条。闸门是模块级单例 `helperUpgradeToastGate`（见文件顶部）。
+ *
+ * # toast 形态
+ *
+ * 复用既有的行内动作组（`ToastOptions.actions`，先例是测速中断态的「继续剩余 / 重新测速」），
+ * 点了跳设置›助手页 —— 与 `HomeScreen` 里 `HELPER_NOT_INSTALLED` 的「去安装」同一个落点。
+ * **不新造 toast 基础设施**：有动作的 toast 由 `toast-queue.ts` 自动获得较长但有限的停留时间。
+ *
+ * 返回值 = **这次真的弹了吗**（供单测把「判定为假」与「被去重挡下」区分开；生产侧不消费）。
+ */
+export function handleHelperUpgradeable(
+  status: { installed?: boolean; upgradeable?: boolean } | null | undefined,
+  t: (key: string) => string
+): boolean {
+  // 判据与后端 `startup_tasks::should_notify_helper_upgradeable` 同口径（`installed && upgradeable`）：
+  // 未装是「去安装」轴（归起核门与 HomeScreen 的 HELPER_NOT_INSTALLED 分支），不是本腿的事。
+  if (!status?.installed || !status.upgradeable) return false;
+  if (!helperUpgradeToastGate()) return false;
+  toast.warning(t('helper.statusUpgradeable'), {
+    description: t('helper.upgradeDescCard'),
+    actions: [
+      {
+        label: t('helper.upgradeToastAction'),
+        onClick: () => useNavStore.getState().enterSettings('helper'),
+      },
+    ],
+  });
+  return true;
 }
 
 /**
@@ -798,6 +852,30 @@ export default function App() {
       if (!coreBaselineWarnGate()) return;
       toast.warning(t('settings.advanced.coreBaselineWarnDesc', { current, bundled }));
     });
+    return off;
+  }, [t]);
+
+  // 提权助手可升级 → 全局可操作 toast（腿 B）。
+  //
+  // **订阅与挂载回读两件都要做，缺一不可**：
+  //  · 订阅：后端 T+7s 那一发（`startup_tasks::spawn_helper_upgradeable_probe`）在 App 已挂载时到达；
+  //  · 挂载回读：那一发若**早于** App 挂载（或 App 因轻量模式返回 / 窗口重建而重挂），只订阅一个字节
+  //    都收不到 —— 事件是一次性广播，后端不重发、也没有重放。
+  // 两者必然重叠，去重靠模块级 `helperUpgradeToastGate`（判定与去重都收在 `handleHelperUpgradeable` 里）。
+  //
+  // **不新增 IPC 命令**：`helper_get_status` 早已返回 `upgradeable`。事件载荷只带版本/构建身份、
+  // 不带 `installed`/`upgradeable`，故事件腿同样要回读一次状态（与 `SettingsHelper.tsx` 同做法）。
+  //
+  // 回读失败 `.catch(() => undefined)` 静默：理由同 `SettingsHelper.tsx` —— 后端未就绪的正常启动
+  // 窗口里弹 toast 是噪音，而这条提示本就不紧急（下次启动还会再判一次）。
+  useEffect(() => {
+    const check = () =>
+      void helperApi
+        .getStatus()
+        .then((s) => handleHelperUpgradeable(s, t))
+        .catch(() => undefined);
+    check();
+    const off = helperApi.onUpgradeable(() => check());
     return off;
   }, [t]);
 

@@ -83,12 +83,15 @@ describe('托盘卡片随系统栏边缘贴合', () => {
     expect(MENU).toMatch(/parseFloat\(style\.borderBottomWidth/);
   });
 
-  it('配置加载后的主视图高度按 WebView 代次固化，节点折叠/展开只走内部滚动', () => {
+  it('配置加载后的主视图高度在**一次展开内**固化，节点折叠/展开只走内部滚动', () => {
     expect(MENU).toContain('const fixedMenuHeightRef = useRef<number | null>(null)');
+    // 锁本身（合/清的判据）2026-09-04 搬进 `tray-menu-height.ts` —— 旧口径「按 WebView 代次固化」
+    // 是错的前提：`keepTrayMenuWarm` 默认开启，日常隐藏不回收 WebView，锁会活到进程结束。
+    // 行为门在 `tray-menu-height.test.ts`（node 环境直测），这里只剩「组件把 ref 与 settled 条件
+    // 接给了它」这一条形态。
     expect(MENU).toMatch(
-      /fixedMenuHeightRef\.current === null\s*&&\s*config\s*&&\s*view === 'main'/,
+      /trayReportedHeight\(\s*fixedMenuHeightRef,\s*measuredHeight,\s*!!config && view === 'main',?\s*\)/,
     );
-    expect(MENU).toContain('const fixedHeight = fixedMenuHeightRef.current ?? measuredHeight');
     expect(MENU).toContain('TRAY_RESIZE, { height: fixedHeight }');
     expect(OVERLAY_RAW).toMatch(/\.tray-menu\s*{[^}]*height:\s*calc\(100vh\s*-\s*12px\);/s);
   });

@@ -403,7 +403,9 @@ async fn helper_gate_proceed_without_successful_install_still_blocks() {
 }
 
 /// **非 TUN 不弹门**：systemProxy 起核绝不因 helper 未装而弹框（弹了就是每次连接都骚扰）。
-/// 变异有牙：删 `run_helper_gate` 首行的 `tun_helper_missing` 短路 → calls 变 1，红。
+/// 变异有牙：删 `run_helper_gate` 首行的 `should_start_via_helper` 短路 → calls 变 1，红
+/// （该短路此前写作 `!self.tun_helper_missing(mode)`，「已装但可升级」腿引入后改成直接判平台/模式 +
+/// 复用同一份 `status()` 快照，语义等价，见 `run_helper_gate` 文档表）。
 #[tokio::test]
 async fn helper_gate_never_prompts_for_non_tun_mode() {
     let (rt, _dir, calls) = test_runtime_gated(HelperGateDecision::Abort);
@@ -585,6 +587,302 @@ async fn helper_gate_without_emitter_falls_back_to_typed_terminal() {
     assert_eq!(
         rt.status().error_code.as_deref(),
         Some(code::HELPER_NOT_INSTALLED)
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// helper「已装但可升级」→ 起核汇流点的温和提示腿（不阻断）
+//
+// **修的是什么**：`EVENT_HELPER_UPGRADEABLE` 在 T+7s 只发一次，全仓唯一消费者是设置›助手页的
+// 页面级订阅；而真正依赖 helper 的那一刻（TUN 起核）从头到尾没读过 `upgradeable` ——
+// `tun_helper_missing` 只问「装没装」。于是真机形态是：TUN 照常用旧 helper 起核，零提示。
+//
+// **本机安全**：以下用例一律**只调 `run_helper_gate` 本身**，不走完整 `start`：mock 只计数、
+// 绝不 `install()`（生产的「升级」支才会弹系统授权），helper 状态由 `with_forced_status_for_tests`
+// 钉死 ⇒ 不读宿主安装态、不连特权 daemon socket、不起核、不碰网络。
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// **纯判定穷举**（形态照 `startup_tasks::should_notify_helper_upgradeable`）：三个合取项各有牙。
+///
+/// 变异有牙：删 `should_start_via_helper` → 非 TUN 那两条转红；删 `installed` → 未装那条转红；
+/// 删 `upgradeable` → 「已是随包版」那条转红；整个写成恒 `true`/恒 `false` → 必有一侧转红。
+#[test]
+fn should_prompt_helper_upgrade_requires_tun_installed_and_upgradeable() {
+    use ProxyModeType::{Manual, SystemProxy, Tun};
+    let up = installed_helper_status(true);
+    let latest = installed_helper_status(false);
+    let missing = crate::runtime::helper::HelperStatusSnapshot {
+        supported: true,
+        ..Default::default()
+    };
+
+    // 正面：三平台的 TUN + 已装 + 可升级 —— 全部命中。
+    for platform in [Platform::Mac, Platform::Win, Platform::Linux] {
+        assert!(
+            should_prompt_helper_upgrade(Tun, platform, &up),
+            "{platform:?} 的 TUN + 已装可升级必须提示"
+        );
+    }
+    // 阴性 ①：非 TUN（这次起核根本没用到 helper，弹升级框是无由骚扰）。
+    for mode in [SystemProxy, Manual] {
+        assert!(
+            !should_prompt_helper_upgrade(mode, Platform::Linux, &up),
+            "{mode:?} 不经 helper 起核 → 不许提示"
+        );
+    }
+    // 阴性 ②：平台无 helper 实现 —— 没有可升级的对象。
+    assert!(!should_prompt_helper_upgrade(Tun, Platform::Other, &up));
+    // 阴性 ③：未装 —— 那是「去装」轴，归 run_helper_gate 的未装腿，两条腿不许同时弹。
+    assert!(!should_prompt_helper_upgrade(
+        Tun,
+        Platform::Linux,
+        &missing
+    ));
+    // 阴性 ④：已装且是随包那一版 —— 绝大多数用户走这条，弹一次都是错。
+    assert!(!should_prompt_helper_upgrade(Tun, Platform::Linux, &latest));
+}
+
+/// **一次性闸门的领取语义**：首次领到、其后一律领不到。
+///
+/// 这是「只弹一次」这条不变式唯一能被**直接**证伪的地方 —— 端到端只能观测到「第二次没弹」，
+/// 而它与「压根没弹过」长得一样。变异有牙：`swap` 改成 `load`（不置位）→ 第二条断言红。
+#[test]
+fn claim_once_yields_exactly_one_claimant() {
+    let flag = AtomicBool::new(false);
+    assert!(claim_once(&flag), "首次必须领到");
+    assert!(
+        !claim_once(&flag),
+        "第二次必须领不到（否则每次起核都会再弹一遍）"
+    );
+    assert!(!claim_once(&flag), "此后恒领不到");
+}
+
+/// **正面 + 反向对照（本组核心）**：可升级 → 弹**一次**；同一运行时第二次起核**不再弹**，
+/// 且两次都放行（`Ok`）。
+///
+/// `run_helper_gate` 是每次 TUN 起核都跑的汇流点（托盘切模式 / 启动自动连接 / switchMode 去抖重启 /
+/// 崩溃自愈重启），不去重 = 每次重启弹一次原生模态。
+///
+/// 变异有牙：删 `claim_once(&self.helper_upgrade_prompted)` → 第二段 `prompts` 变 2，红；
+/// 把闸门从实例字段改回 `static` → 本用例与同进程别的用例互相偷名额，红且不稳定；
+/// 让这条腿返回 `Err` → 两处 `expect` 直接炸。
+#[tokio::test]
+async fn upgradeable_helper_prompts_once_and_never_blocks_the_start_gate() {
+    let (rt, _dir, prompts) = test_runtime_installed_helper(true, false);
+
+    rt.run_helper_gate(ProxyModeType::Tun)
+        .await
+        .expect("升级提示腿**永不阻断**起核：第一次必须放行");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "helper 已装但可升级 → 起核汇流点必须提示一次（=0 即真机那条缺陷：静默用旧 helper 起核）"
+    );
+
+    // 反向对照：第二次（= 托盘切模式 / 去抖重启 / 崩溃自愈重启再跑一遍门）。
+    rt.run_helper_gate(ProxyModeType::Tun)
+        .await
+        .expect("第二次同样放行");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "一次性闸门失效 = 每次重启弹一次原生模态，比原缺陷坏得多"
+    );
+}
+
+/// 用户选「升级并继续」同样 `Ok` —— **决策 1 的另一半**：两个按钮都走向放行。
+///
+/// 变异有牙：把「用户选了升级」这一支写成 `Err`/`?` → 本 `expect` 炸（那正是「把一次本来能成功的
+/// TUN 启动变成失败」这个更严重回归的形状）。
+#[tokio::test]
+async fn choosing_upgrade_also_lets_the_start_continue() {
+    let (rt, _dir, prompts) = test_runtime_installed_helper(true, true);
+    rt.run_helper_gate(ProxyModeType::Tun)
+        .await
+        .expect("选了「升级并继续」照样放行");
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+}
+
+/// 已装且**是随包那一版** → 零弹框、零开销放行（绝大多数用户的路径）。
+/// 变异有牙：判据里删掉 `status.upgradeable` → `prompts` 变 1，红。
+#[tokio::test]
+async fn up_to_date_helper_never_prompts() {
+    let (rt, _dir, prompts) = test_runtime_installed_helper(false, false);
+    rt.run_helper_gate(ProxyModeType::Tun).await.expect("放行");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        0,
+        "已是最新还弹 = 每个 TUN 用户每次连接都被骚扰"
+    );
+}
+
+/// 非 TUN 模式 → 这次起核根本不经 helper，即便可升级也不许弹。
+/// 变异有牙：判据里删掉 `should_start_via_helper` → `prompts` 变 1，红。
+#[tokio::test]
+async fn upgrade_prompt_never_fires_for_non_tun_mode() {
+    let (rt, _dir, prompts) = test_runtime_installed_helper(true, false);
+    for mode in [ProxyModeType::SystemProxy, ProxyModeType::Manual] {
+        rt.run_helper_gate(mode).await.expect("非 TUN 直接放行");
+    }
+    assert_eq!(prompts.load(Ordering::SeqCst), 0);
+}
+
+/// **崩溃自愈腿一律不弹**（决策 5）：用户没做任何操作，凭空弹框比不弹坏。
+///
+/// 且**名额不许被它领走** —— 抑制腿若排在一次性闸门之后，崩溃自愈会把唯一一次机会消耗掉，
+/// 用户随后手动起核时反而一个字都看不到。故第二段用交互式再跑一次，必须还能弹。
+///
+/// 变异有牙：删 `helper_gate_interactive()` 判 → 第一段 `prompts` 变 1，红；
+/// 把 `claim_once` 挪到 `helper_gate_interactive()` 之前 → 第二段 `prompts` 仍是 0，红。
+#[tokio::test]
+async fn upgrade_prompt_suppressed_in_non_interactive_restart_without_burning_the_gate() {
+    let (rt, _dir, prompts) = test_runtime_installed_helper(true, false);
+    let rt2 = Arc::clone(&rt);
+    with_helper_gate_suppressed(async move {
+        rt2.run_helper_gate(ProxyModeType::Tun)
+            .await
+            .expect("非交互同样放行（本腿永不阻断）");
+    })
+    .await;
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        0,
+        "崩溃自愈重启腿不许弹（用户没做任何操作）"
+    );
+
+    rt.run_helper_gate(ProxyModeType::Tun)
+        .await
+        .expect("交互腿放行");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "被抑制的那次不许把一次性名额领走，否则用户手动起核时反而看不到提示"
+    );
+}
+
+/// emitter 未接线（单测 / setup 前极早期）→ **静默 `Ok(())`**，且同样不烧名额。
+/// 变异有牙：删 emitter 判 → `spawn_blocking` 里 `is_some_and` 拿不到 emitter 返 false，
+/// 名额已被领走 ⇒ 第二段断言红。
+#[tokio::test]
+async fn upgrade_prompt_is_silent_without_emitter() {
+    let dir = fresh_test_dir();
+    let config = Arc::new(ConfigManager::new(dir.clone()));
+    let helper = Arc::new(HelperRuntime::with_forced_status_for_tests(
+        dir.clone(),
+        installed_helper_status(true),
+    ));
+    let mesh = Arc::new(MeshRuntime::new(dir.clone()));
+    let clearer: Box<dyn SystemProxyClearer> =
+        Box::new(polaris_system_integration::production_proxy_controller(
+            dir.join(polaris_system_integration::PROXY_MARKER_FILENAME)
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    let rt = Arc::new(ProxyRuntime::new(
+        config,
+        helper,
+        mesh,
+        clearer,
+        Arc::new(NoNetworkDoh),
+    ));
+    // 刻意不接 emitter。
+    rt.run_helper_gate(ProxyModeType::Tun)
+        .await
+        .expect("没 emitter 也必须放行（本腿永不阻断）");
+    assert!(
+        rt.status().error_code.is_none(),
+        "本腿一个错误码都不许落 —— 它不是失败路径"
+    );
+
+    let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    rt.set_error_emitter(Box::new(RecordingErrorEmitter {
+        helper_upgrade_prompts: Arc::clone(&prompts),
+        ..Default::default()
+    }));
+    rt.run_helper_gate(ProxyModeType::Tun).await.expect("放行");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "emitter 未接线那次不许把一次性名额领走"
+    );
+}
+
+/// **源码级接线门**：升级提示腿确实长在起核汇流点里、四道闸都在、且结构上产不出 `Err`。
+///
+/// 行为门（上面几条）证明的是「mock 下这条腿的表现」；本条证明的是「它长在 `run_helper_gate` 里，
+/// 而不是长在某个没人调的辅助函数里」，以及「快照只取一次」这条无法用 mock 观测的性质
+/// （mock 的 `status()` 没有副作用，取两次与取一次的行为完全相同）。两扇门之间的缝就是生产路径。
+#[test]
+fn helper_upgrade_leg_is_wired_into_the_start_gate() {
+    let src = crate::test_support::crate_code("runtime/proxy/startup.rs");
+
+    // ── 守卫自检：取材面确实是 startup.rs，且剥注释既没吃空、也确实吃掉了注释 ──
+    assert!(
+        src.len() > 50_000,
+        "取材面只有 {} 字节 —— 扫错文件或被吃空了，门已失去判据",
+        src.len()
+    );
+    assert!(
+        src.contains("pub(super) async fn start_inner("),
+        "取材面里找不到 start_inner —— 扫的不是起核编排模块"
+    );
+    assert!(
+        !src.contains("§K7"),
+        "`§K7` 在本文件只出现在注释里；它还在 = 注释没被剥，正面 contains 断言可被注释充数"
+    );
+
+    // ── 汇流点本体 ──
+    let gate = method_body(&src, "    pub(super) async fn run_helper_gate(");
+    assert!(
+        gate.contains("self.maybe_prompt_helper_upgrade(mode, &status).await"),
+        "已装腿必须调升级提示腿（没有它 = 起核路径上从不读 upgradeable，即真机那条缺陷）：\n{gate}"
+    );
+    assert_eq!(
+        gate.matches("self.helper.status()").count(),
+        1,
+        "`status()` 是一次系统调用（已装时还会 ping socket），两条腿必须共用同一份快照：\n{gate}"
+    );
+    assert!(
+        gate.contains("if status.installed {"),
+        "两条腿的分岔必须读同一份快照的 `installed`，而不是再调一次 `tun_helper_missing`：\n{gate}"
+    );
+
+    // ── 提示腿本体：四道闸 + 阻塞隔离 + 结构上不阻断 ──
+    let leg = method_body(&src, "    async fn maybe_prompt_helper_upgrade(");
+    for needle in [
+        "should_prompt_helper_upgrade(mode, self.helper.platform(), status)",
+        "helper_gate_interactive()",
+        "self.error_emitter.get().is_none()",
+        "claim_once(&self.helper_upgrade_prompted)",
+        "tokio::task::spawn_blocking(",
+        "prompt_helper_upgrade(&snapshot)",
+    ] {
+        assert!(
+            leg.contains(needle),
+            "升级提示腿缺了 `{needle}`（四道闸 / 阻塞隔离 / 弹框调用少一样都是缺陷）：\n{leg}"
+        );
+    }
+    // 一次性闸门必须**最后**领：排在抑制腿之前会让崩溃自愈把名额烧掉。
+    let claim_at = leg
+        .find("claim_once(&self.helper_upgrade_prompted)")
+        .expect("上面已断言存在");
+    for earlier in [
+        "helper_gate_interactive()",
+        "self.error_emitter.get().is_none()",
+    ] {
+        assert!(
+            leg.find(earlier).expect("上面已断言存在") < claim_at,
+            "`{earlier}` 必须排在一次性闸门之前，否则被它拦下的那次会把唯一一次名额领走"
+        );
+    }
+    // 永不阻断：本腿体内不得出现任何错误构造 / `?`。
+    assert!(
+        !leg.contains("StartError") && !leg.contains("Err(") && !leg.contains("?;"),
+        "升级提示腿一旦能返回 Err，就会把一次本来能成功的 TUN 启动变成失败：\n{leg}"
+    );
+    assert!(
+        !leg.contains("set_error("),
+        "本腿不是失败路径，落错误码会让前端把它渲染成起核失败：\n{leg}"
     );
 }
 

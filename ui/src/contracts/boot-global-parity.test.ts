@@ -107,6 +107,9 @@ const BOOT_GLOBALS = [
   { name: '__POLARIS_TRAY_EDGE__', kind: 'rust-raw-self-consume' },
   { name: '__POLARIS_SET_TRAY_EDGE__', kind: 'rust-raw-self-consume' },
   { name: '__POLARIS_NATIVE_HOVER__', kind: 'ts-callback-to-rust-call' },
+  // 托盘每次展开时宿主叫 renderer 重量窗高（`show_ready_overlay` 的 eval 桥）。与上面那条同型：
+  // owner 在 TS，Rust 只调不赋 —— 这也正是「不新开 IPC 通道」的代价面，登记在册才有人守。
+  { name: '__POLARIS_TRAY_REMEASURE__', kind: 'ts-callback-to-rust-call' },
 ] as const satisfies readonly BootGlobalContract[];
 
 interface Source {

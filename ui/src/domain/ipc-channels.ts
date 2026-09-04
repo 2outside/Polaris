@@ -179,6 +179,9 @@ export const IPC_CHANNELS = {
   // 更新管理
   UPDATE_CHECK: 'update_check',
   UPDATE_DOWNLOAD: 'update_download',
+  // 回读最后一帧 update:progress。更新卡的状态在组件本地，只订阅事件的话组件重挂载后就对在途/已完成的
+  // 下载一无所知（下完了的那一帧永不再来）⇒ 挂载时补一次回读。
+  UPDATE_GET_PROGRESS: 'update_get_progress',
   UPDATE_INSTALL: 'update_install',
   UPDATE_SKIP: 'update_skip',
   // App 更新弹窗（独立 mini 更新窗）：主进程 → 弹窗推状态载荷；弹窗 → 主进程回传按钮/关闭动作。

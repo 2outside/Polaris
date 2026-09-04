@@ -226,6 +226,131 @@ fn renderer_ready_is_the_only_cold_show_commit_point() {
     );
 }
 
+/// 每次展开都必须叫 renderer 重量窗高 —— 「托盘菜单的『退出』要往下拉才看得见」那条缺陷的防线。
+///
+/// # 为什么判据只能是源码级
+///
+/// 现象只在 mac/Windows 的**自绘** WebView 浮层上（Linux 走的是原生 AppIndicator 级联菜单，
+/// 见 `app_tray.rs`），本机连复现都做不到；而缺陷本身就是「`show_ready_overlay` 一个字节都没往
+/// renderer 推」—— 判据正是这个调用点在不在，不是任何可在 Linux 上跑出来的运行期行为。
+///
+/// # 为什么顺序也要断言
+///
+/// `keepTrayMenuWarm` 默认开启 ⇒ 隐藏只收起浮层、不回收 WebView，前端那把「首次量到就锁死」的
+/// 高度锁因此活到整个进程结束。把重量通知排在 `win.show()` 之前，量到的仍是上一次展开时的布局，
+/// 这条腿就退化成「调了但没用」——恰是本仓「门在但没牙」那一类。
+#[test]
+fn every_overlay_show_tells_the_renderer_to_remeasure() {
+    let tray_rs = tray_rs();
+    let show = crate::commands::guard_scan::top_level_fn_body(
+        &tray_rs,
+        "pub(super) fn show_ready_overlay(",
+    );
+    let show_call = show
+        .find("win.show()")
+        .expect("`show_ready_overlay` 里找不到 `win.show()` —— 顺序判据的锚点已过期，先修判据");
+    let bridge = show.find("__POLARIS_TRAY_REMEASURE__").expect(
+        "每次展开都必须叫 renderer 重量：warm 的 WebView 隐藏期间不重建，前端高度锁一旦合上就活到\
+         进程结束 —— 首次量偏矮就一直矮（「退出」被挤进滚动区），中途换屏/改分辨率则可能高到出屏",
+    );
+    assert!(
+        show.contains("win.eval("),
+        "重量通知必须走既有 eval 桥（同 `hide_overlay` 里的 `__POLARIS_NATIVE_HOVER__`），不新开 IPC 通道"
+    );
+    assert!(
+        show_call < bridge,
+        "重量必须排在 `win.show()` 之后：隐藏态 WebView 量到的仍是上一次展开的布局"
+    );
+    assert_eq!(
+        show.matches("__POLARIS_TRAY_REMEASURE__").count(),
+        1,
+        "重量桥在本函数里只该有一处调用点（多处 = 一次展开被要求量好几轮）"
+    );
+}
+
+/// 腿 B 的**宿主**半边：屏幕参数变了必须由宿主推给 renderer，且走腿 A 那条既有 eval 桥。
+///
+/// # 为什么判据只能是源码级
+///
+/// 同 [`every_overlay_show_tells_the_renderer_to_remeasure`]：现象只在 mac/Windows 的自绘浮层上
+/// （Linux 走原生 AppIndicator 级联菜单），本机连复现都做不到；而缺陷形态本身就是「宿主一个字节
+/// 都没往 renderer 推」—— 判据正是这些调用点在不在。mac 腿还多一层：`#[cfg(target_os = "macos")]`
+/// 的代码 Linux 编译单元根本不含，判据若也只能在 mac 上跑，本地对它就是全盲（同
+/// `autosave_name_gate` 的取舍）。
+///
+/// # 为什么「窗不在时 no-op」也要钉
+///
+/// 屏幕换代与「用户想看菜单」无关。为一条状态通知去冷建 WebView，等于把一次系统通知变成一次建窗
+/// 开销，还会把 `keepTrayMenuWarm=false` 用户刚回收掉的窗又拉回来 —— 那是把修复变成新缺陷。
+#[test]
+fn screen_change_is_pushed_by_the_host_over_the_existing_eval_bridge() {
+    let tray_rs = tray_rs();
+
+    // ① mac 权威源：AppKit 的屏幕参数通知（显示器增删/分辨率/缩放/重排全从这里发），
+    //    不是我们自己那个窗的任何事件。
+    let observer = crate::commands::guard_scan::top_level_fn_body(
+        &tray_rs,
+        "pub(super) fn install_screen_change_observer(",
+    );
+    assert!(
+        observer.contains("NSApplicationDidChangeScreenParametersNotification")
+            && observer.contains("addObserverForName_object_queue_usingBlock"),
+        "mac 的屏幕换代腿必须挂在 AppKit 的屏幕参数通知上：`ScaleFactorChanged` 只跟 backing scale 走，\
+         同 DPI 下改分辨率/插拔扩展屏一律不发，而 mac 侧前端 media query 腿在 WKWebView 上未核实 —— \
+         这一半没有第二个人守"
+    );
+    assert!(
+        observer.contains("notify_screen_change_remeasure"),
+        "观察者回调必须汇到既有的重量出口，不得另起一条通知路径（新通道/新全局都是净亏）"
+    );
+
+    // ② 实现写了还得真接上：`build_overlay` 是浮层唯一的建窗点，两条腿都必须挂在这里。
+    let build = crate::commands::guard_scan::top_level_fn_body(&tray_rs, "fn build_overlay(");
+    assert_eq!(
+        build
+            .matches("install_screen_change_observer(app);")
+            .count(),
+        1,
+        "mac 屏幕观察者必须在建窗点恰好接一次 —— 实现写了没接线 = 静默零执行，\
+         而这类腿失效时不会报错，只会让用户看到按旧屏算出来的窗"
+    );
+    assert!(
+        build.contains("WindowEvent::ScaleFactorChanged { .. } => notify_screen_change_remeasure("),
+        "Windows 腿必须接 `ScaleFactorChanged`：tao 把 `WM_DPICHANGED` 归一到它，\
+         那正是「主屏 150% + 副屏 100% 拖窗过去」这一档 —— Windows 上最常见的混合 DPI 形态"
+    );
+
+    // ③ 出口：走既有 eval 桥，窗不在即 no-op，不建窗、不开新通道。
+    let notify = crate::commands::guard_scan::top_level_fn_body(
+        &tray_rs,
+        "pub(super) fn notify_screen_change_remeasure(",
+    );
+    assert!(
+        notify.contains("win.eval(") && notify.contains("__POLARIS_TRAY_REMEASURE__"),
+        "重量通知必须走腿 A 那条既有 eval 桥（同一个全局），不新开 IPC 通道、不新增第二个全局"
+    );
+    assert!(
+        notify.contains("app.get_webview_window(TRAY_LABEL)") && notify.contains("return"),
+        "必须先查浮层窗在不在，不在就直接返回"
+    );
+    assert!(
+        !notify.contains("build_overlay(") && !notify.contains("queue_overlay_build("),
+        "不得为了推一条状态通知去建窗：屏幕换代与「用户想看菜单」无关，\
+         下一次展开的腿 A 本来就会量"
+    );
+    assert!(
+        !notify.contains(".emit(") && !notify.contains("IPC_CHANNELS"),
+        "这是一次单向、无载荷的通知，通道的注册/契约/双侧维护成本全是净亏"
+    );
+
+    // ④ 反向：不许改成监听自己这个窗的尺寸/位置 —— 那是「改尺寸 → 收事件 → 重量 → 改尺寸」
+    //    的正反馈环，`TRAY_MAX_HEIGHT_LOGICAL` 的注释里记着一次被 ResizeObserver 推到上限的实例。
+    assert!(
+        !build.contains("WindowEvent::Resized") && !build.contains("WindowEvent::Moved"),
+        "浮层窗的 Resized/Moved 正是我们自己经 tray_resize 改出来的，拿它触发重量 = 正反馈环"
+    );
+}
+
 #[test]
 fn tray_retention_is_independent_from_main_lightweight_setting() {
     let tray_rs = tray_rs();

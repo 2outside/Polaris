@@ -67,7 +67,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::logging::SING_BOX_TARGET;
-use crate::runtime::helper::HelperStopOps;
+use crate::runtime::helper::{HelperStatusSnapshot, HelperStopOps};
 use crate::runtime::route_binding::plan_runtime_bindings;
 
 /// 就绪等待预算的**下限**（ms）——上游 `ProxyManager.CORE_READY_TIMEOUT_MS`（:524）那个固定门的原值。
@@ -444,6 +444,36 @@ pub(super) fn should_start_via_helper(mode: ProxyModeType, platform: Platform) -
     mode.is_tun() && matches!(platform, Platform::Mac | Platform::Win | Platform::Linux)
 }
 
+/// **已装 helper「该不该提示升级」的纯判定**（与 [`should_start_via_helper`] 同层，形态照
+/// `startup_tasks::should_notify_helper_upgradeable`）。
+///
+/// 判据 = 本次起核确实要经 helper（TUN + 有实现的平台）**且** helper 已装 **且** 可升级。
+/// 三个合取项各有各的牙：
+/// - 删 `should_start_via_helper` → systemProxy/manual 起核也弹升级框（用户这次根本没用到 helper）；
+/// - 删 `installed` → 未装时也命中，与 [`ProxyRuntime::run_helper_gate`] 的「去装」腿撞车
+///   （用户连点两个框，且第二个框问的是一件此刻无意义的事）；
+/// - 删 `upgradeable` → 每次 TUN 起核都弹，已装且最新的绝大多数用户被恒骚扰。
+///
+/// `ready` **刻意不再查一遍**（同 `should_notify_helper_upgradeable` 的理由）：`upgradeable` 在
+/// `helper-client::compute_status` 里已经合取 `ready`，在这里重复只会制造「两处判据、改一处漏一处」。
+#[must_use]
+pub(super) fn should_prompt_helper_upgrade(
+    mode: ProxyModeType,
+    platform: Platform,
+    status: &HelperStatusSnapshot,
+) -> bool {
+    should_start_via_helper(mode, platform) && status.installed && status.upgradeable
+}
+
+/// 一次性闸门的**领取**动作：`true` = 本次领到（可以做那件只做一次的事），`false` = 已被领走。
+///
+/// 抽成自由函数而不是就地写 `swap`，是为了让「第二次必须领不到」这条属性能被**直接**证伪 ——
+/// 埋在 `maybe_prompt_helper_upgrade` 里的一句 `swap` 只能靠端到端观测间接推断，而
+/// 「没弹第二次」与「压根没弹过」在那种观测下长得一样。
+pub(super) fn claim_once(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::SeqCst)
+}
+
 tokio::task_local! {
     /// **本次起核的交互性**（移植 上游 `start(config, {interactive:false})`，`ProxyManager.ts:1475`）。
     ///
@@ -558,8 +588,11 @@ impl ProxyRuntime {
     /// **本机安全 / 不连 socket**：未安装态 `helper.status()` 经 `compute_status_with_client` 先判
     /// `is_installed` 短路，绝不触碰 socket（见 `runtime/helper.rs`）。
     ///
-    /// **唯一调用点 = [`run_helper_gate`](Self::run_helper_gate) 的短路判定**（「非 TUN / 已装 → 零开销
-    /// 放行」以及用户确认安装后的复检）。command 层曾另有一份同谓词的前置拦截，**已删** —— 它只守住
+    /// **唯一生产调用点 = [`run_helper_gate`](Self::run_helper_gate) 的复检腿**（用户确认安装后
+    /// 「到底装上没有」那一问）。门的入口短路已改为直接判
+    /// [`should_start_via_helper`] + 复用同一份 `status()` 快照 —— 因为「已装但可升级」这一格也要
+    /// 读同一份快照，而 `status()` 是一次系统调用，取两次既多付一次开销，又会让两条腿看到不一致的
+    /// 世界。command 层曾另有一份同谓词的前置拦截，**已删** —— 它只守住
     /// 「点连接按钮」一条腿，托盘切模式 / 启动自动连接 / switchMode 去抖重启全绕过它（§K7「门开在别处
     /// 却当全域门」）。别再据本注释以为命令层还有一道门：门只有 `start_inner` 汇流点那一道。
     pub(super) fn tun_helper_missing(&self, mode: ProxyModeType) -> bool {
@@ -572,7 +605,9 @@ impl ProxyRuntime {
     ///
     /// | 情形 | 结果 |
     /// |---|---|
-    /// | 非 TUN / 已装 helper | `Ok(())` 放行（零弹框、零系统调用） |
+    /// | 非 TUN / 平台无 helper 实现 | `Ok(())` 放行（零弹框、零系统调用） |
+    /// | 已装且是随包那一版 | `Ok(())` 放行（一次 `status()`，零弹框） |
+    /// | **已装但可升级** | 温和提示腿（[`maybe_prompt_helper_upgrade`](Self::maybe_prompt_helper_upgrade)），**恒 `Ok(())`** |
     /// | 需要门但被非交互抑制（崩溃自愈） | `Err` + [`code::HELPER_NOT_INSTALLED`] |
     /// | 需要门但 emitter 未接线（单测 / setup 前） | `Err` + [`code::HELPER_NOT_INSTALLED`] |
     /// | 用户取消 | `Err` + [`code::HELPER_GATE_ABORTED`] |
@@ -596,11 +631,30 @@ impl ProxyRuntime {
     /// 外加一条永久占用的阻塞池线程 —— 比排队更坏，且最可能命中的正是「用户正在输管理员密码」那一刻。
     /// 死锁风险已排除：`blocking_show` 跑在 tokio 阻塞池线程而非 Tauri 主线程，`panic=unwind` 下守卫的
     /// `Drop` 可靠。故这是**体验降级而非卡死**，等真机确认为高频痛点再动。
-    async fn run_helper_gate(self: &Arc<Self>, mode: ProxyModeType) -> Result<(), StartError> {
-        if !self.tun_helper_missing(mode) {
-            return Ok(()); // 非 TUN / 已装 → 绝大多数起核走这条，零开销。
+    pub(super) async fn run_helper_gate(
+        self: &Arc<Self>,
+        mode: ProxyModeType,
+    ) -> Result<(), StartError> {
+        // 非 TUN / 平台无 helper 实现 → 绝大多数起核走这条：零系统调用、零弹框。
+        if !should_start_via_helper(mode, self.helper.platform()) {
+            return Ok(());
         }
 
+        // `status()` 是一次系统调用（已装时还会 ping 一次 helper socket）。**只取这一份快照**，
+        // 下面两条腿共用：分两次取不仅多付一次调用，还会让两条腿看到不一致的世界
+        // （例如「判未装 → 弹安装框」与「判已装 → 弹升级框」同时成立）。
+        let status = self.helper.status();
+
+        // ── 腿 2：**已装** → 起核本身没有障碍，唯一可能要做的是「可升级」的温和提示。
+        //
+        // 本腿的返回类型是 `()`，结构上产不出 `Err` —— 那正是「永不阻断」这条决策的落点：
+        // 把一次本来能成功的 TUN 起核变成失败，比「继续用旧 helper 起核」这个原缺陷严重得多。
+        if status.installed {
+            self.maybe_prompt_helper_upgrade(mode, &status).await;
+            return Ok(());
+        }
+
+        // ── 腿 1：**未装** → 阻断式引导门（判定 → 弹框 → 就地授权安装 → 复检）。
         // 非交互（崩溃自愈）→ 退回本门引入前的行为：类型化终态，不打扰用户。
         // 读 task-local：只有**当前调用链**被 `with_helper_gate_suppressed` 包住才为真；并发的用户手动
         // 起核跑在另一个任务里，读不到本标记 ⇒ 照常弹引导（A2 修的正是这条）。
@@ -625,7 +679,6 @@ impl ProxyRuntime {
             ));
         }
 
-        let status = self.helper.status();
         let me = Arc::clone(self);
         let decision = tokio::task::spawn_blocking(move || {
             me.error_emitter
@@ -656,6 +709,80 @@ impl ProxyRuntime {
         }
         log::info!("TUN 提权引导：helper 已就位 → 原地继续起核（无需用户重新点连接）");
         Ok(())
+    }
+
+    /// **「helper 已装但可升级」的温和提示腿**（[`run_helper_gate`](Self::run_helper_gate) 的腿 2）。
+    ///
+    /// # 修的是什么（根因）
+    ///
+    /// 「可升级」此前只有一条出口：`startup_tasks::spawn_helper_upgradeable_probe` 在 T+7s 广播一次
+    /// `event:helperUpgradeable`。而那条事件全仓唯一的消费者是**设置›助手页**的页面级订阅 ——
+    /// 用户不站在那一页时没有任何人在听。真正依赖 helper 的那一刻（TUN 起核）则从头到尾**没读过**
+    /// `upgradeable`：`tun_helper_missing` 只问「装没装」。于是真机形态是：TUN 照常用旧 helper 起核，
+    /// 升级这件事只有主动点开设置页才会被发现。**一个状态只以事件形态广播、且唯一消费者是页面级的，
+    /// 就等于没有消费者。**
+    ///
+    /// # 返回 `()` 是判据本身，不是省事
+    ///
+    /// 既定决策：**永不阻断**。用户选「直接继续」、或选了升级但升级失败，起核都照常继续 ——
+    /// 把一次本来能成功的 TUN 启动变成失败，比原缺陷严重得多。用 `()` 而不是
+    /// `Result<(), StartError>`，这条约束就由**类型**兜住：想让它阻断必须先改签名，改不动就漏不出去。
+    ///
+    /// # 四道闸的顺序（每一道都必须在，且顺序不可换）
+    ///
+    /// 1. [`should_prompt_helper_upgrade`]：非 TUN / 未装 / 已是随包版 → 不弹；
+    /// 2. [`helper_gate_interactive`]：崩溃自愈重启腿一律不弹（用户没做任何操作却被凭空索要授权，
+    ///    且崩溃循环里最多连弹 `MAX_RESTART_COUNT` 次）；
+    /// 3. emitter 未接线（单测 / setup 前极早期）→ 静默（没法问用户，也不该假装问过）；
+    /// 4. **一次性闸门**（[`claim_once`] + [`helper_upgrade_prompted`](ProxyRuntime::helper_upgrade_prompted)）：
+    ///    本方法挂在**每次 TUN 起核**都跑的汇流点上（托盘切模式 / 启动自动连接 / switchMode 去抖重启 /
+    ///    崩溃自愈重启），不去重 = 每次重启弹一次原生模态。
+    ///
+    /// 闸 4 **必须最后领**：前三道任一不过就不该消耗掉这唯一一次机会 —— 否则崩溃自愈腿（闸 2 拦下的
+    /// 那条）会把名额领走，用户随后手动起核时反而一个字都看不到。
+    async fn maybe_prompt_helper_upgrade(
+        self: &Arc<Self>,
+        mode: ProxyModeType,
+        status: &HelperStatusSnapshot,
+    ) {
+        if !should_prompt_helper_upgrade(mode, self.helper.platform(), status) {
+            return;
+        }
+        if !helper_gate_interactive() {
+            log::info!("helper 可升级提示：非交互启动（崩溃自愈）→ 不打扰用户");
+            return;
+        }
+        if self.error_emitter.get().is_none() {
+            log::debug!("helper 可升级提示：emitter 未接线 → 静默跳过");
+            return;
+        }
+        if !claim_once(&self.helper_upgrade_prompted) {
+            log::debug!("helper 可升级提示：本进程已提示过一次 → 不重复打扰");
+            return;
+        }
+
+        let snapshot = status.clone();
+        let me = Arc::clone(self);
+        // `spawn_blocking` 的理由与 `run_helper_gate` 的未装腿逐字相同：`prompt_helper_upgrade` 内含
+        // 原生模态 `blocking_show` + 可能的系统授权安装（可阻塞 30s+）。在 async worker 上直调会阻塞
+        // 整个 worker；在 Tauri 主线程上调 `blocking_show` 会死锁。
+        let upgraded = tokio::task::spawn_blocking(move || {
+            me.error_emitter
+                .get()
+                .is_some_and(|e| e.prompt_helper_upgrade(&snapshot))
+        })
+        .await
+        // join 失败**照样不阻断**（本腿的全部约束）：记一句就继续起核。这里刻意不用 `?` ——
+        // 本方法压根没有 `Err` 可返回，那正是「永不阻断」由类型兜住的意思。
+        .unwrap_or_else(|e| {
+            log::warn!("helper 可升级提示任务 join 失败：{e} → 照常继续起核");
+            false
+        });
+        if upgraded {
+            log::info!("helper 可升级提示：用户选择升级并继续 → 继续起核");
+        } else {
+            log::info!("helper 可升级提示：用户选择直接继续 → 继续起核");
+        }
     }
 
     /// start 主体（错误路径统一由 [`Self::start`] 收口 `end`）。

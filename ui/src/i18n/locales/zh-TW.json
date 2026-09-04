@@ -31,6 +31,7 @@
     "installingDesc": "等待一次性系統管理員授權…",
     "upgradeDescCard": "已安裝的 helper 版本與目前應用程式不一致，需一次系統管理員授權完成同步升級",
     "upgradeHelperAction": "升級提權助手（需授權）",
+    "upgradeToastAction": "去升級",
     "btmTitle": "背景執行被停用 (BTM)",
     "btmDesc": "macOS 阻擋了背景項目，請在「系統設定 › 一般 › 登入項目與擴充功能」中允許，或回退到異常自動復原",
     "loginItemsPath": "系統設定 › 一般 › 登入項目與擴充功能",

@@ -204,6 +204,19 @@ export const updateApi = {
   onProgress(listener: (progress: UpdateProgress) => void): () => void {
     return listen(IPC_CHANNELS.EVENT_UPDATE_PROGRESS, listener);
   },
+
+  /**
+   * 回读后端**最后一帧**进度；`null` = 本次进程一帧都没发过。
+   *
+   * `onProgress` 只是订阅：更新卡的状态在组件本地，组件重挂载（切页 / 窗口销毁重建 / 轻量模式回收）
+   * 之后它对在途下载一无所知，只能等下一帧；而下载**已经下完**时那一帧永不再来 —— 卡片会永远停在
+   * 「检查更新」。下载跑在后端 `spawn_blocking`，窗口没了照跑，所以这是常态而非边角。
+   *
+   * `null` 是「后端没有可讲的进度」，**不是** idle 帧：后端不编造态，UI 保持自己的初值即可。
+   */
+  async getProgress(): Promise<UpdateProgress | null> {
+    return invoke(IPC_CHANNELS.UPDATE_GET_PROGRESS);
+  },
 };
 
 // ============================================================================

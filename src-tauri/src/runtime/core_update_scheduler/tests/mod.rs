@@ -27,6 +27,10 @@ fn auto_update_core_defaults_to_off_and_needs_explicit_true() {
     assert!(auto_update_core_enabled(&json!({ "autoUpdateCore": true })));
 }
 
+/// 夹具里的资产体积用**真实**数字（sing-box v1.14.0 linux-amd64.tar.gz，`gh api` 实测）：
+/// 下载闸由它派生，编的数字看不出「闸够不够大」这件事。
+const FIXTURE_ASSET_SIZE: u64 = 31_639_897;
+
 fn check(
     has_update: bool,
     current: &str,
@@ -40,6 +44,7 @@ fn check(
         "latestVersion": latest,
         "downloadUrl": url,
         "sha256": "a".repeat(64),
+        "fileSize": FIXTURE_ASSET_SIZE,
         "crossBand": cross_band,
     })
 }
@@ -58,6 +63,9 @@ fn in_band_update_downloads() {
             latest: "1.13.14".into(),
             url: "https://x/core.tar.gz".into(),
             sha256: Some("a".repeat(64)),
+            // 体积声明必须原样透传：丢了它，自动腿的下载闸会恒取上限 —— 手点腿按声明值收紧、
+            // 自动腿不收，两条腿的闸就此分叉，而这个不对称没有任何物理成因。
+            file_size: Some(FIXTURE_ASSET_SIZE),
         }
     );
     assert!(!d.clear_cross_band_notice);

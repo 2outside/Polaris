@@ -38,6 +38,9 @@ vi.mock('./lib/desktop-notify', () => ({
   documentElement: { dir: '', lang: '' },
 };
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { isProxyErrorCode } from './contracts/types';
 
 // 认领闸门用**真实实现**（不 mock）：本组要验的正是「事件腿与认领闸门的合璧」，mock 掉闸门等于
@@ -357,5 +360,141 @@ describe('handleProxyErrorEvent（代理错误分腿）', () => {
       expect(toastErrorMock).toHaveBeenCalledTimes(1);
       expect(notifyDesktopMock).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 腿 B：「提权助手可升级」→ 全局可操作 toast
+ *
+ * 修的是什么：`EVENT_HELPER_UPGRADEABLE` 的行内契约写的是「渲染端 toast 引导升级」，而全仓唯一的
+ * 订阅者是设置›助手页的**页面级**订阅 —— 用户不站在那一页时没有任何人在听。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+describe('handleHelperUpgradeable（提权助手可升级 → 可操作 toast）', () => {
+  let handleHelperUpgradeable: (typeof import('./App'))['handleHelperUpgradeable'];
+  let useNavStore: (typeof import('./store/nav-store'))['useNavStore'];
+
+  beforeEach(async () => {
+    toastWarningMock.mockClear();
+    t.mockClear();
+    // 去重闸门是**模块级单例**（这正是它的判据：挂组件内会随 App 重挂复位），故每条用例都必须
+    // 重取一份干净的模块图。`./App` 与 `./store/nav-store` **必须一起重取** —— 只重取后者会让
+    // App 仍持有旧 store 实例，跳转断言就落在一个没人看的对象上（同本文件上一组的理由）。
+    vi.resetModules();
+    ({ handleHelperUpgradeable } = await import('./App'));
+    ({ useNavStore } = await import('./store/nav-store'));
+  });
+
+  it('正面：已装 + 可升级 → 弹一条带动作的 warning toast（文案全部走 i18n 键）', () => {
+    expect(handleHelperUpgradeable({ installed: true, upgradeable: true }, t)).toBe(true);
+    expect(toastWarningMock).toHaveBeenCalledTimes(1);
+    const [msg, opts] = toastWarningMock.mock.calls[0];
+    expect(msg).toBe('helper.statusUpgradeable');
+    expect(opts.description).toBe('helper.upgradeDescCard');
+    // 「可操作」不是形容词：没有 actions 的 toast 是 pointer-events:none 的一次性通知，
+    // 用户看到「该升级了」却无处可点 —— 那与不提示的差别只有一句空话。
+    expect(opts.actions).toHaveLength(1);
+    expect(opts.actions[0].label).toBe('helper.upgradeToastAction');
+  });
+
+  it('正面：点动作跳设置›助手页（与 HELPER_NOT_INSTALLED 的「去安装」同一个落点）', () => {
+    expect(useNavStore.getState().scope).toBe('main');
+    handleHelperUpgradeable({ installed: true, upgradeable: true }, t);
+    toastWarningMock.mock.calls[0][1].actions[0].onClick();
+    expect(useNavStore.getState().scope).toBe('settings');
+    expect(useNavStore.getState().settingsScreen).toBe('helper');
+  });
+
+  it('反向对照：同一会话第二次不再弹（两个触发源必然重叠，没闸门就是同一件事弹两条）', () => {
+    expect(handleHelperUpgradeable({ installed: true, upgradeable: true }, t)).toBe(true);
+    // 第二发 = 挂载回读与事件撞上，或 App 因轻量模式返回 / 窗口重建而重挂。
+    expect(handleHelperUpgradeable({ installed: true, upgradeable: true }, t)).toBe(false);
+    expect(handleHelperUpgradeable({ installed: true, upgradeable: true }, t)).toBe(false);
+    expect(toastWarningMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['已装且是最新', { installed: true, upgradeable: false }],
+    ['未装（那是「去安装」轴，不是本腿的事）', { installed: false, upgradeable: true }],
+    ['空对象', {}],
+    ['null（getStatus 尚未返回）', null],
+    ['undefined', undefined],
+  ])('阴性：%s → 不弹，且**不消耗**一次性名额', (_label, status) => {
+    expect(handleHelperUpgradeable(status, t)).toBe(false);
+    expect(toastWarningMock).not.toHaveBeenCalled();
+    // 名额没被烧掉的证明：紧接着喂一个真命中的状态，仍必须弹得出来。
+    // 少了这一条，「判定为假」与「闸门先被误领走」在上面的断言下长得一模一样。
+    expect(handleHelperUpgradeable({ installed: true, upgradeable: true }, t)).toBe(true);
+    expect(toastWarningMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 源码级接线门：腿 B 的两条腿确实都挂在全局事件订阅层
+ *
+ * 上面那组测的是「判定与副作用」，它在**根本没人调用** `handleHelperUpgradeable` 时同样全绿 ——
+ * 两扇门之间的缝就是生产路径。故这里扫 App.tsx 源码，钉死「订阅 + 挂载回读」两件都在。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const APP_RAW = readFileSync(fileURLToPath(new URL('./App.tsx', import.meta.url)), 'utf8');
+
+/**
+ * 去注释后的源码。两个方向都必要（同 `tray/tray-menu-height.test.ts` 的 `MENU`）：本仓注释习惯
+ * 逐字引用被守的调用（本腿的 effect 注释里就写着 `helper_get_status`、`SettingsHelper.tsx`），
+ * 扫原文会被自己的说明文字充数 —— 把接线整段删掉、注释留着，正面 `toContain` 照样绿。
+ */
+const APP = APP_RAW.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+/** 按唯一锚点取一段并封顶 —— 切片射程由判据决定，不由书写顺序决定。 */
+function sliceApp(anchor: string, end: string): string {
+  const hits = APP.split(anchor).length - 1;
+  expect(hits, `锚点 ${anchor} 命中 ${hits} 次（应为 1）`).toBe(1);
+  const a = APP.indexOf(anchor) + anchor.length;
+  const b = APP.indexOf(end, a);
+  expect(b, `找不到收尾串 ${end} —— 切片会一路跑到文件尾`).toBeGreaterThan(a);
+  return APP.slice(a, b);
+}
+
+describe('接线门：可升级提示挂在全局事件订阅层（订阅 + 挂载回读，缺一不可）', () => {
+  it('守卫自检：扫到的确实是 App.tsx，去注释后没被吃空，且注释确实被吃掉了', () => {
+    expect(APP_RAW.length).toBeGreaterThan(10_000);
+    expect(APP).toContain('export function handleHelperUpgradeable');
+    expect(APP.length).toBeGreaterThan(APP_RAW.length / 3);
+    // 这句只在注释里出现过；它还在 = 注释没被剥，下面每条正面断言都可能是注释在充数。
+    expect(APP).not.toContain('就等于没有消费者');
+  });
+
+  it('闸门是模块级单例（挂组件内会随 App 重挂复位，等于没去重）', () => {
+    expect(APP).toContain('const helperUpgradeToastGate = createOnceGate();');
+    expect(
+      sliceApp('export function handleHelperUpgradeable(', '\n}\n'),
+      '判定与去重必须在同一处收口，否则订阅腿与回读腿各弹一条'
+    ).toContain('if (!helperUpgradeToastGate()) return false;');
+  });
+
+  it('两条腿都在同一个 effect 里：事件订阅 + 挂载即回读一次', () => {
+    const body = sliceApp(
+      '    const check = () =>',
+      '  }, [t]);',
+    );
+    // 用正则而不是 `toContain`：这条链被换行折成了多行，写死单行字面量的断言会在下一次
+    // 换行位置变动时假红（判据是「调了谁」，不是「怎么排版」）。
+    expect(body, '回读腿：事件早于 App 挂载时，只订阅一个字节都收不到').toMatch(
+      /helperApi\s*\.getStatus\(\)/
+    );
+    expect(body, '回读腿必须在挂载时**真的被调用**，不能只定义不调').toContain('\n    check();');
+    expect(body, '订阅腿：App 已挂载时由 T+7s 那一发送达').toContain(
+      'helperApi.onUpgradeable(() => check())'
+    );
+    expect(body, '两条腿都要经同一个判定+去重入口').toContain('handleHelperUpgradeable(s, t)');
+    expect(body, '回读失败静默（后端未就绪的启动窗口里弹 toast 是噪音）').toContain(
+      '.catch(() => undefined)'
+    );
+    expect(body, 'effect 必须返回退订闭包，否则 App 重挂后订阅泄漏').toContain('return off;');
+  });
+
+  it('不新增 IPC 命令：只用既有的 helper 通道（`helper_get_status` 早已返回 upgradeable）', () => {
+    expect(APP).toContain("import { helperApi, unlockApi } from './ipc/api-client';");
+    expect(APP).not.toMatch(/helperUpgrade[A-Za-z]*Command|invoke\(\s*['"]helper:/);
   });
 });

@@ -90,6 +90,12 @@ pub enum CycleAction {
         latest: String,
         url: String,
         sha256: Option<String>,
+        /// 资产体积声明（`check.fileSize` = GitHub 的 `asset.size`），下载闸由它派生。
+        ///
+        /// 与 `url` / `sha256` 一起从**同一次** check 里取，而不是到下载腿再去查一遍：
+        /// 本腿与手点腿走的是同一条 `core_update_check`，声明值就在手上，不透传等于让自动腿
+        /// 的闸恒取上限 —— 那个不对称没有任何物理成因，纯粹是少接了一根线。
+        file_size: Option<u64>,
     },
 }
 
@@ -191,6 +197,7 @@ pub fn decide_cycle(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            file_size: check.get("fileSize").and_then(Value::as_u64),
         },
     }
 }
@@ -600,8 +607,11 @@ impl CoreUpdateScheduler {
                 latest,
                 url,
                 sha256,
+                file_size,
             } => {
-                match run_download_and_stage(&state, &latest, &url, sha256.as_deref()).await {
+                match run_download_and_stage(&state, &latest, &url, sha256.as_deref(), file_size)
+                    .await
+                {
                     Ok(outcome) => {
                         log::info!("内核 {latest} 暂存结果：{outcome:?}");
                         emit_auto_status(app, state.updater(), None);
@@ -690,13 +700,18 @@ async fn run_download_and_stage(
     latest: &str,
     url: &str,
     expected_sha: Option<&str>,
+    declared_size: Option<u64>,
 ) -> Result<ApplyOutcome, String> {
     let base = core_paths::base_dir().ok_or("内核可写目录未初始化")?;
     let asset_name = url.rsplit('/').next().unwrap_or("core-asset").to_string();
 
     // ── 真下载（重定向 / 完整性 / 停滞看门狗 / 镜像回退全在既有适配器里）。
-    // 内核腿整包入内存（解归档要用）⇒ 闸就是内存闸，逐字沿用形参化之前的 16 MiB。
-    let dl = crate::commands::updater_downloader(state, crate::runtime::http::MAX_DOWNLOAD_BYTES);
+    // 内核腿整包入内存（解归档要用）⇒ 闸就是内存闸，按 check 给出的资产体积派生、封顶
+    // `CORE_UPDATE_MAX_BYTES`（与手点腿同一份判据，见 `commands::core_update_size_limit`）。
+    let dl = crate::commands::updater_downloader(
+        state,
+        crate::commands::core_update_size_limit(declared_size),
+    );
     let url_owned = url.to_string();
     let bytes = tokio::task::spawn_blocking(move || dl.download(&url_owned))
         .await

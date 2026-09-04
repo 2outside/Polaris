@@ -1224,6 +1224,34 @@ async function readTsx() {
 }
 
 /**
+ * `wireUpdateProgress` 的函数体（`settings-logic.ts`，剥注释后切片）。
+ *
+ * 2026-09-04：挂载期接线从 `useAppUpdate` 的 effect 里提到了这个纯函数 —— 「先订阅后回读」
+ * 与「回读让位给事件」这两条判据在 hook 里跑不进单测（本仓 vitest 是 node 环境、无 DOM ⇒
+ * effect 不执行）。**判据跟着实现走**：谓词与 reducer 的调用点现在在这一面上，把一份 patch
+ * 摊到各 setter 上那半仍在 hook 面上（[`readTsx`]）。
+ */
+async function readWiringBody() {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath: toPath } = await import('node:url');
+  const file = path.join(path.dirname(toPath(import.meta.url)), 'settings-logic.ts');
+  const raw = fs.readFileSync(file, 'utf8');
+  const src = stripTsComments(file, raw);
+  expect(raw.includes('/**'), '取材文件本应含块注释（否则剥注释自检无信息量）').toBe(true);
+  expect(src.includes('/**'), '注释未被剥掉 —— 注释里的针会冒充生产调用点').toBe(false);
+  const a = src.indexOf('export function wireUpdateProgress(');
+  expect(a, '取材锚点不在了：export function wireUpdateProgress(').toBeGreaterThan(-1);
+  const b = src.indexOf('\n}\n', a);
+  expect(b, 'wireUpdateProgress 没有列 0 收尾 —— 切片会一路跑到文件尾').toBeGreaterThan(a);
+  const body = src.slice(a, b);
+  // 切片自检（正负两头）：既不能塌成空，也不能吞掉半份文件去喂饱正向断言。
+  expect(body.includes('w.subscribe('), '切片没含到订阅那一行 —— 取材器塌了').toBe(true);
+  expect(body.length, '切片过长 —— 封顶失效，判据会被函数体外的同名标识符喂饱').toBeLessThan(1200);
+  return body;
+}
+
+/**
  * 抽出 `{us === 'X' && (` 那一段 JSX：到**下一个** `{us === ` 或**本块自己的收尾** `\n        )}`
  * 为止，取先到的那个。
  *
@@ -1331,14 +1359,23 @@ describe('无摘要明示：接线面 + 五语文案', () => {
     //  ① 谓词根本没被调（有人把它抄成内联 `p.status === 'downloading' || ...`）；
     //  ② 谓词调了、但下面的 status 分支里**又**补了一次 —— 枚举又长回来了。
     const listener = between('updateApi.onProgress(', 'async function checkUpdate(');
+    // 判据分两面（2026-09-04 接线提到 `wireUpdateProgress` 之后）：hook 这一面只剩「复位动作
+    // 接给了谁」，谓词的调用点在 `wireUpdateProgress` 那一面 —— 事件与挂载期快照回读共用它。
     expect(
-      listener.includes('progressResetsIntegrity(p.status)'),
-      '监听器必须经 progressResetsIntegrity 判定，不得内联复刻 status 枚举',
+      /resetIntegrity: \(\) => setDownloadIntegrity\('unknown'\),/.test(listener),
+      '复位没接在 wireUpdateProgress 的 resetIntegrity 上 —— 第三个入口就没有复位了',
+    ).toBe(true);
+    const wiring = await readWiringBody();
+    expect(
+      wiring.includes('progressResetsIntegrity(p.status)'),
+      '接线必须经 progressResetsIntegrity 判定，不得内联复刻 status 枚举',
     ).toBe(true);
     // 那唯一一次必须挂在谓词上，而不是躺在某个 status 分支里。
-    expect(listener).toMatch(
-      /if \(progressResetsIntegrity\(p\.status\)\) setDownloadIntegrity\('unknown'\);/,
-    );
+    expect(wiring).toMatch(/if \(progressResetsIntegrity\(p\.status\)\) w\.resetIntegrity\(\);/);
+    expect(
+      /p\.status\s*===/.test(wiring),
+      '接线又开始按 status 分支取事实 —— 那是枚举型判据，判定必须全部下达给真值表',
+    ).toBe(false);
     // 反向：监听器里**一个 status 分支都不许有**（判据全在真值表里）。
     //
     // 前身是「逐个 status 分支取臂体、断言臂体内不得再复位」——那是**枚举型判据**：射程被钉死在
@@ -1574,9 +1611,17 @@ describe('预发布档次明示：接线面 + 五语文案', () => {
       expect(b, '取材锚点不在了：async function checkUpdate(').toBeGreaterThan(a);
       return src.slice(a, b);
     })();
-    expect(listener.includes('updateCardPatch(p)'), '监听器不再经 updateCardPatch 判定').toBe(true);
-    // 本帧与更新卡无关时必须**整帧丢弃**：只 return 一半就会留下「改了态没带事实」的中间形态。
-    expect(listener).toMatch(/if \(!patch\) return;/);
+    // reducer 的调用点 2026-09-04 随接线提到了 `wireUpdateProgress`：事件与挂载期快照回读两条路
+    // 共用**同一个** `updateCardPatch`（那里只有这一处调用点），回读路径上不可能另生一份映射 ——
+    // 而两份「帧 → 卡片」映射必然漂成「同一次下载在两条路上显示成两个样子」。
+    const wiring = await readWiringBody();
+    expect(wiring.includes('updateCardPatch(p)'), '接线不再经 updateCardPatch 判定').toBe(true);
+    expect(
+      (wiring.match(/updateCardPatch\(/g) ?? []).length,
+      'updateCardPatch 必须只有一个调用点 —— 两处就是两条路各翻译一遍',
+    ).toBe(1);
+    // 本帧与更新卡无关时必须**整帧丢弃**：只落一半就会留下「改了态没带事实」的中间形态。
+    expect(wiring).toMatch(/if \(patch\) w\.applyPatch\(patch\);/);
     const WIRING: Readonly<Record<string, string>> = {
       setUs: 'patch.us',
       setUpdateInfo: 'patch.info',

@@ -258,6 +258,12 @@ const SITES: readonly Site[] = [
     why: '基准类：handleRegionChange 的地区/反向变化提示要与已持久化值比较；提交本身只发 regionRouting 顶层 patch',
   },
   {
+    file: 'components/screens/settings/use-config.ts',
+    shape: 'useAppStore.getState().config',
+    route: 'disk',
+    why: '基准类：设置页首帧种子。本 hook 自持的那份 state 就是**磁盘副本**（对外才经 effectiveConfigOf 派生），种子改喂合成值 = 把暂存值烧进磁盘副本，它会随下一次整份事务写进 config.json，也会被 onChanged 的整份重拉抹掉',
+  },
+  {
     file: 'components/dialogs/use-subscription-create-dialog-operation.ts',
     shape: 'useAppStore.getState().config?.subscriptions?.some',
     route: 'disk',

@@ -344,6 +344,68 @@ fn test_runtime_gated(
     (rt, dir, calls)
 }
 
+/// 「helper 已装」的状态快照（`upgradeable` 由入参决定），供 `test_runtime_installed_helper` 注入。
+///
+/// **本机造不出这一格**：`never_installed_for_tests` 的 `SysOps` 替身恒报未装，而换成真
+/// `StdSysOps` 就是让单测去读宿主真实安装态、并连特权 daemon 的 socket。故钉快照。
+fn installed_helper_status(upgradeable: bool) -> crate::runtime::helper::HelperStatusSnapshot {
+    crate::runtime::helper::HelperStatusSnapshot {
+        supported: true,
+        installed: true,
+        ready: true,
+        upgradeable,
+        version: Some(polaris_helper_proto::proto_version::CURRENT),
+        expected_protocol_version: polaris_helper_proto::proto_version::CURRENT,
+        // 旧 helper 缺 build id —— 这本身就是「可升级」的证据形态之一（见 `HelperStatusSnapshot`）。
+        helper_build_id: upgradeable.then(|| "stale-build".to_owned()),
+        expected_build_id: polaris_helper_proto::build_identity::current().to_owned(),
+        ..Default::default()
+    }
+}
+
+/// helper **已装**的运行时 + 「可升级提示」弹出次数句柄（`test_runtime_gated` 的已装变体）。
+///
+/// `upgrade_choice` = mock 里用户按的那个键（`true` = 升级并继续）。生产实现在 `true` 支里会真去
+/// `install()`，故 mock 是本测唯一能安全表达「用户点了升级」的地方 —— 它只计数、绝不装。
+fn test_runtime_installed_helper(
+    upgradeable: bool,
+    upgrade_choice: bool,
+) -> (
+    Arc<ProxyRuntime>,
+    TestDir,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let dir = fresh_test_dir();
+    let config = Arc::new(ConfigManager::new(dir.clone()));
+    let helper = Arc::new(HelperRuntime::with_forced_status_for_tests(
+        dir.clone(),
+        installed_helper_status(upgradeable),
+    ));
+    let mesh = Arc::new(MeshRuntime::new(dir.clone()));
+    // 收口器与 `test_runtime_in` 逐字同源（marker 文件驱动，不碰宿主代理设置）。
+    let clearer: Box<dyn SystemProxyClearer> =
+        Box::new(polaris_system_integration::production_proxy_controller(
+            dir.join(polaris_system_integration::PROXY_MARKER_FILENAME)
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    let rt = Arc::new(ProxyRuntime::new(
+        config,
+        helper,
+        mesh,
+        clearer,
+        Arc::new(NoNetworkDoh),
+    ));
+    let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    rt.set_error_emitter(Box::new(RecordingErrorEmitter {
+        helper_upgrade_prompts: Arc::clone(&prompts),
+        helper_upgrade_choice: upgrade_choice,
+        ..Default::default()
+    }));
+    rt.stale_sweep_disabled.store(true, Ordering::SeqCst);
+    (rt, dir, prompts)
+}
+
 /// TUN 配置（门必命中：本机 helper 恒未装）。
 fn tun_config() -> Value {
     let mut c = two_node_config(7891, "node-a");
@@ -604,6 +666,14 @@ struct RecordingErrorEmitter {
     helper_gate_calls: Arc<std::sync::atomic::AtomicUsize>,
     /// 预置的用户决策。`Default` 为 `Abort`（见 `prompt_helper_gate` 注释）。
     helper_gate_decision: HelperGateDecision,
+    /// 「helper 可升级」提示被弹出的次数。`0` = 这条腿**根本没跑**；`>1` = 一次性闸门失效
+    /// （每次 TUN 起核弹一遍原生模态，比它要修的缺陷坏得多）。
+    helper_upgrade_prompts: Arc<std::sync::atomic::AtomicUsize>,
+    /// 预置的用户选择：`true` = 「升级并继续」，`false`（`Default`）= 「直接继续」。
+    ///
+    /// **默认必须是 false**：`true` 会让 mock 声称用户点了升级，而生产实现在那一支里会真去调
+    /// `install()`（弹系统授权）。默认落在「什么都不做」那一侧，任何要测升级支的用例必须显式置位。
+    helper_upgrade_choice: bool,
     /// 每次 `emit_proxy_error` 那一刻观测到的解锁失效次数（= 续延已跑过几轮）。
     ///
     /// 「运行期自证必须排在续延之后」是一条**时序**不变式：只看终态（两件事都发生了）验不出顺序，
@@ -685,6 +755,10 @@ impl ProxyErrorEmitter for RecordingErrorEmitter {
     fn prompt_helper_gate(&self, _status: &HelperStatusSnapshot) -> HelperGateDecision {
         self.helper_gate_calls.fetch_add(1, Ordering::SeqCst);
         self.helper_gate_decision
+    }
+    fn prompt_helper_upgrade(&self, _status: &HelperStatusSnapshot) -> bool {
+        self.helper_upgrade_prompts.fetch_add(1, Ordering::SeqCst);
+        self.helper_upgrade_choice
     }
 }
 

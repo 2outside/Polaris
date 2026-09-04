@@ -10,7 +10,6 @@ use super::{
     CODE_NO_BACKUP, CORE_CHECK_TOTAL_TIMEOUT_MS,
 };
 use crate::response::{ok_void, ApiResponse};
-use crate::runtime::http::MAX_DOWNLOAD_BYTES;
 use crate::runtime::{core_paths, core_swap, AppRuntime};
 use polaris_updater::core_build::{ComparableVersion, CoreBuildKind};
 use polaris_updater::github::{find_suitable_singbox_asset, CORE_UPDATE_REPO};
@@ -163,9 +162,65 @@ pub(super) async fn core_update_check_inner(
         "downloadUrl": asset.browser_download_url,
         "assetName": asset.name,
         "sha256": asset.digest.as_deref().and_then(parse_asset_digest),
+        // 体积声明：下载腿的闸由它派生（见 [`core_update_size_limit`]）。缺了它闸只能恒取上限，
+        // 「服务端说这个包多大」这条本就免费拿得到的信息就完全用不上 —— GitHub 的 `asset.size`
+        // 与资产同源，是本链路唯一现成的体积基准。
+        "fileSize": asset.size,
         "releaseNotes": release.body.clone().unwrap_or_default(),
         "crossBand": cross_band,
     })))
+}
+
+/// 内核腿下载闸的**绝对上限**（128 MiB）—— 不只是「声明值缺失时的回落值」。
+///
+/// # 为什么它不能与 App 腿的 512 MiB 共用一个常量
+///
+/// 两条腿的上限来自**不同的物理约束**：内核腿把整包收进 `Vec<u8>` 再解归档
+/// （[`extract_core_bytes`] 要的是完整字节）⇒ 闸就是**内存**闸，堆上真按这个数占；
+/// App 安装包腿改成流式落盘后内存不随包体积长 ⇒
+/// [`APP_UPDATE_MAX_BYTES`](super::app_update::APP_UPDATE_MAX_BYTES) 管的只是「别把盘写满」。
+/// 共用一个数等于把「盘扛得住 512 MiB」当成「堆扛得住 512 MiB」。
+///
+/// # 128 MiB 这个数从哪来
+///
+/// sing-box 官方归档今天在 26–33 MiB 量级（v1.14.0 五个平台资产实测，数字钉在 `tests` 里）。
+/// 4 倍余量够上游膨胀好几年，又不至于给「服务端声明一个天文数字」留出 OOM 口子 ——
+/// 上限的职责是兜住撒谎的声明值，不是精确判定。
+pub(crate) const CORE_UPDATE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// 内核腿的下载闸取值：`min(声明值, 上限)`，声明缺失 / 为 0 一律回落 [`CORE_UPDATE_MAX_BYTES`]。
+///
+/// # 为什么不能沿用 [`MAX_DOWNLOAD_BYTES`](crate::runtime::http::MAX_DOWNLOAD_BYTES)
+///
+/// 那是内存型下载的**通用默认**（16 MiB），而官方 sing-box 资产**全部** 26 MiB 以上 ⇒
+/// 两条内核腿逐字传它 = 每一次在线换核都会被 `open_download_response` 的 Content-Length
+/// 预检早拒。之所以至今没炸，只因 `core-manifest.json` 的 `bundledCoreVersion` 恰好等于官方最新，
+/// `is_newer` 恒 false、压根不提供更新；上游发下一个补丁版那天全线红。
+/// 要改的是「内核这一腿用哪个闸」，不是把那个通用默认放宽 —— 它还有别的消费者
+/// （[`CoreDownloader`](crate::runtime::http::CoreDownloader) 的构造默认），
+/// 改常量本身会把闸一并放宽到与本腿无关的调用点上。
+///
+/// # 陷阱：`fileSize` 为 0 不等于「包是空的」
+///
+/// [`GithubAsset::size`](polaris_updater::github::GithubAsset::size) 在 GitHub 少给 `size`
+/// 字段时按 **0** 填（`#[serde(default)]`）。直接拿它当闸 ⇒ 闸值 0，**任何**包都过不去，
+/// 且失败长得像「下载超限」，没人会想到成因是清单少了个字段。
+///
+/// # 声明值同样必须被上限压住
+///
+/// 声明值是**服务端给的数**，闸不能由它单方面顶到任意高：一个报 100 GiB 的 `fileSize`
+/// 会让预检形同不设，整包一路读进堆里 —— 那正是本上限要防的那件事。
+///
+/// **纯函数** ⇒ 三条路径各有单测（含拿真实资产体积对一次的正面夹具）。
+pub(crate) fn core_update_size_limit(declared: Option<u64>) -> usize {
+    let limit = match declared.filter(|n| *n > 0) {
+        Some(n) => n.min(CORE_UPDATE_MAX_BYTES),
+        None => CORE_UPDATE_MAX_BYTES,
+    };
+    // 这条回落（装不下 → usize::MAX）在受支持的宿主上**不可达**：`app_update.rs` 顶部的
+    // `compile_error!` 已把非 64 位目标挡在编译期之外。写 `try_from` 而不是 `as usize`，
+    // 是因为 `as` 会**静默截断**成一个小值 —— 闸比声明值还紧，正常包反而被拒。
+    usize::try_from(limit).unwrap_or(usize::MAX)
 }
 
 /// 上游 `core-update:update`：下载并更新内核（下载 → sha256 → 解压 → 停核 → 换 → 起核）。
@@ -201,8 +256,10 @@ pub async fn core_update_run(
     let current = u.read_core_version();
 
     // 前端传 downloadUrl（invokeScalar → `{ value }`）；缺省则自己先查一次。
-    let (url, expected_sha, latest) = match value.filter(|s| !s.trim().is_empty()) {
-        Some(u) => (u, None, String::new()),
+    // `declared_size` 只有「自己查一次」这条分支拿得到：前端传 downloadUrl 时手上只有一个 URL，
+    // 没有任何体积声明可用 ⇒ 回落上限（见 [`core_update_size_limit`]）。
+    let (url, expected_sha, latest, declared_size) = match value.filter(|s| !s.trim().is_empty()) {
+        Some(u) => (u, None, String::new(), None),
         None => {
             let checked = core_update_check(state.clone()).await?;
             let Some(data) = checked.data.filter(|_| checked.success) else {
@@ -229,6 +286,7 @@ pub async fn core_update_run(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                data.get("fileSize").and_then(Value::as_u64),
             )
         }
     };
@@ -253,8 +311,9 @@ pub async fn core_update_run(
     }
 
     let asset_name = url.rsplit('/').next().unwrap_or("core-asset").to_string();
-    // 内核腿整包入内存（解归档要用）⇒ 闸就是内存闸，逐字沿用形参化之前的 16 MiB。
-    let dl = updater_downloader(&state, MAX_DOWNLOAD_BYTES);
+    // 内核腿整包入内存（解归档要用）⇒ 闸就是内存闸，按 GitHub 声明的资产体积派生、封顶
+    // [`CORE_UPDATE_MAX_BYTES`]。
+    let dl = updater_downloader(&state, core_update_size_limit(declared_size));
     let url_for_task = url.clone();
     let bytes = match tokio::task::spawn_blocking(move || dl.download(&url_for_task)).await {
         Ok(Ok(b)) => b,
@@ -294,6 +353,9 @@ pub async fn core_update_run(
     )
     .await)
 }
+
+#[cfg(test)]
+mod tests;
 
 /// 把下载到的资产解成裸核字节（归档 → 解压 → 定位；已是裸二进制则原样返回）。
 ///
