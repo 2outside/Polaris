@@ -1,16 +1,36 @@
 #!/bin/bash
 # 在可弃 Linux VM 上跑一个自动故障切换验收场景，产出证据包（不做判定——判定见 assert.py）。
 #
-# 用法：run.sh <场景名> <观测秒数>
+# 用法：GRAPHICS=escape|default run.sh <场景名> <观测秒数>
 #
 # 硬约束（写进脚本而不是文档，因为文档对执行没有强制力）：
 #   - 接管模式钉死 system、不建 TUN ⇒ 全程不改路由表，SSH 控制通道不可能断。
 #   - 应用生命周期由 `timeout` 界定，脚本不对任何 pid 发信号。
 #   - 冷启到首帧实测约 60s（软件渲染的 VM），预热不足会把「还没画」误判成「起不来」。
+#
+# ── GRAPHICS：本脚本曾经比生产**更保守** ──
+# 早先版本无条件设 `WEBKIT_DISABLE_COMPOSITING_MODE / WEBKIT_DISABLE_DMABUF_RENDERER /
+# LIBGL_ALWAYS_SOFTWARE`，也就是把图形逃生门**替用户打开着**跑。可生产默认是
+# `hardwareAcceleration=true`（main.rs 的 `apply_hardware_acceleration_escape` 只在用户手动关时
+# 才设这些变量）⇒ 本 harness 跑的是逃生门开着那条腿，用户跑的是另一条，两者不是同一条代码路径。
+# 2026-08-24 AppImage 上 WebKitWebProcess 连崩 6 次（EGL_BAD_PARAMETER）走的正是**默认腿**，本
+# harness 结构上看不见。
+#
+#   escape（默认）：保留三个变量。**不覆盖 GPU/DMABUF/合成向量**，G3 会每轮明说这件事。
+#                   仍是故障切换场景的基线 —— 换基线会让既有场景的证据换了含义。
+#   default       ：一个图形变量都不设 = 生产默认路径。G3 此时有牙：渲染进程必须真的活过。
+#
+# 换言之默认值只保证「既有 failover 结论逐字不变」，不保证图形向量被覆盖；要覆盖就显式跑
+# `GRAPHICS=default`，这是两个不同目的的腿，不是同一条的两种口味。
 set -u
 
 SCEN=${1:?缺场景名}
 OBS=${2:?缺观测秒数}
+GRAPHICS=${GRAPHICS:-escape}
+case "$GRAPHICS" in
+  escape|default) ;;
+  *) echo "FATAL: GRAPHICS 只能是 escape 或 default，实为 '$GRAPHICS'"; exit 1 ;;
+esac
 APPDIR=/root/.config/com.polaris.app/polaris
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=/var/tmp/polaris-acceptance/$SCEN
@@ -36,11 +56,20 @@ for _ in $(seq 1 15); do sleep 1; xdpyinfo -display :$DISP >/dev/null 2>&1 && br
 xdpyinfo -display :$DISP >/dev/null 2>&1 || { echo "FATAL: Xvfb 起不来 (:$DISP)"; exit 1; }
 
 # ── 应用：生命周期由 timeout 界定 ──
-env WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 \
+# 图形环境按 GRAPHICS 分腿（见头注）。**写进证据包**：事后只看 timeline 分不出这轮是哪条腿，
+# 而两条腿的「绿」覆盖面完全不同，混读就是把 escape 腿的绿当成默认腿的绿。
+if [ "$GRAPHICS" = escape ]; then
+  GFX_ENV=(WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1)
+else
+  GFX_ENV=()
+fi
+printf 'graphics=%s\nenv=%s\n' "$GRAPHICS" "${GFX_ENV[*]:-<none>}" > "$OUT/graphics.txt"
+# `${a[@]+"${a[@]}"}`：bash < 4.4 在 `set -u` 下展开空数组会报 unbound，VM 的 bash 版本不由本仓决定。
+env ${GFX_ENV[@]+"${GFX_ENV[@]}"} \
   timeout $((WARMUP + OBS)) /usr/bin/polaris > "$OUT/stdout.log" 2>&1 &
 APP=$!
 
-echo "场景=$SCEN 预热=${WARMUP}s 观测=${OBS}s 起于 $(date -Is)"
+echo "场景=$SCEN 图形腿=$GRAPHICS 预热=${WARMUP}s 观测=${OBS}s 起于 $(date -Is)"
 : > "$OUT/timeline.tsv"
 printf 't\twebproc\twindow\tcolors\tlog_lines\n' >> "$OUT/timeline.tsv"
 
@@ -87,7 +116,22 @@ if [ $LIVED -lt $((WARMUP + OBS - 15)) ]; then
 else
   G2=ok
 fi
-echo "G0(配置生效)=$G0  G1(内核已起)=$G1  G2(观测窗完整)=$G2"
+# ── G3 图形腿自曝闸 ──
+# default 腿有牙：观测窗里 WebKitWebProcess 至少活过一次。恒 0 ⇒ 渲染进程起不来或连崩
+# （2026-08-24 AppImage 的形态），此时任何 UI 结论都无信息量。
+# escape 腿没牙也不装有：明说 GPU/DMABUF/合成向量本轮未覆盖，免得后来人把它读成图形已验。
+WEBPROC_MAX=$(awk -F'\t' 'NR>1 && $2 ~ /^[0-9]+$/ && $2+0 > m { m = $2+0 } END { print m+0 }' "$OUT/timeline.tsv")
+if [ "$GRAPHICS" = default ]; then
+  if [ "${WEBPROC_MAX:-0}" -gt 0 ]; then G3=ok; else
+    echo "G3 FAIL: 默认图形腿下 WebKitWebProcess 在整个观测窗内恒为 0 ⇒ 渲染进程从未存活（或反复崩）"
+    grep -m1 -E "EGL_BAD_PARAMETER|undefined symbol|WebKitWebProcess" "$OUT/stdout.log" 2>/dev/null || true
+    G3=fail
+  fi
+else
+  echo "G3 SKIP: 本轮是 escape 腿（三个图形变量已设）⇒ GPU/DMABUF/合成向量未覆盖，别把本轮的绿读成图形已验；要覆盖跑 GRAPHICS=default"
+  G3=skip
+fi
+echo "G0(配置生效)=$G0  G1(内核已起)=$G1  G2(观测窗完整)=$G2  G3(图形腿=$GRAPHICS)=$G3  webproc_max=$WEBPROC_MAX"
 
 echo "=== 证据包 $OUT ==="
 cat "$OUT/timeline.tsv"

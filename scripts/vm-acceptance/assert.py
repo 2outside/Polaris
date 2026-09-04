@@ -6,11 +6,39 @@
 
 **每条「必须没有」都配一条「必须有」**：否则「没观测到」既可能是守卫生效、也可能是心跳
 压根没上场，两者不可分辨。`plain-broken` 是全部静默结论的对照组，必须与它同批跑。
+
+G3（图形腿）同样在这里复判，而不是只由 run.sh 打一行：操作者消费的是本脚本的**退出码**，
+run.sh 那行 echo 对退出码没有任何强制力。escape 腿把三个 WEBKIT_/LIBGL_ 变量替用户设上了 ——
+那不是生产默认路径，故它的绿不覆盖 GPU/DMABUF/合成向量，本脚本每轮明说这件事。
 """
 
 import pathlib
 import re
 import sys
+
+# 图形腿：run.sh 把本轮实际形态写进证据包的 graphics.txt（escape=逃生门已替用户打开，
+# default=生产默认路径）。旧证据包没有这个文件，按「未登记 ⇒ 未覆盖」处理，不追认为已验。
+GRAPHICS_UNKNOWN = "unknown"
+
+
+def graphics_leg(evidence: pathlib.Path) -> str:
+    marker = evidence / "graphics.txt"
+    if not marker.exists():
+        return GRAPHICS_UNKNOWN
+    for line in marker.read_text(errors="replace").splitlines():
+        if line.startswith("graphics="):
+            return line.split("=", 1)[1].strip() or GRAPHICS_UNKNOWN
+    return GRAPHICS_UNKNOWN
+
+
+def webproc_max(timeline: pathlib.Path) -> int:
+    """观测窗内 WebKitWebProcess 计数的峰值；列脏或缺列一律记 0（宁可判成没证据）。"""
+    peak = 0
+    for row in timeline.read_text(errors="replace").splitlines()[1:]:
+        cols = row.split("\t")
+        if len(cols) > 1 and cols[1].isdigit():
+            peak = max(peak, int(cols[1]))
+    return peak
 
 # 心跳在起核处对本世代求一次值、只打一行（`runtime/proxy/auto_switch.rs`）。
 BLOCKED = "自动换节点本世代不工作"
@@ -80,6 +108,21 @@ def check(evidence: pathlib.Path) -> int:
     if shots < 4:
         print(f"[{scen}] 证据不可用：只采到 {shots} 个时间点 ⇒ 观测窗被截断")
         return 2
+    # ── G3 图形腿 ──
+    # default 腿有牙：渲染进程恒 0 = 起不来或连崩（2026-08-24 AppImage 的 EGL_BAD_PARAMETER 形态），
+    # 此时 UI 侧一切结论无信息量 ⇒ 判「证据不可用」而不是「不通过」。
+    # escape / 未登记只播报，不改退出码：它们本来就不承诺覆盖图形向量，红了才是误伤。
+    leg = graphics_leg(evidence)
+    peak = webproc_max(timeline)
+    if leg == "default":
+        if peak == 0:
+            print(f"[{scen}] 证据不可用：默认图形腿下 WebKitWebProcess 峰值为 0 ⇒ 渲染进程从未存活")
+            return 2
+        print(f"[{scen}] 图形腿=default（生产默认路径），WebKitWebProcess 峰值={peak}")
+    elif leg == "escape":
+        print(f"[{scen}] 图形腿=escape：三个 WEBKIT_/LIBGL_ 变量已替用户设上 ⇒ 本轮不覆盖 GPU/DMABUF/合成向量")
+    else:
+        print(f"[{scen}] 图形腿未登记（旧证据包无 graphics.txt）⇒ 按未覆盖图形向量处理")
 
     must, must_not, why = EXPECT[scen]
     bad = []
