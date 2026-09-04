@@ -4,6 +4,9 @@ use crate::test_support::{crate_code, crate_file};
 /// 本地 renderer → 应用命令这条高权限边界的 CSP 契约（门的实体在这个子模块里）。
 mod csp_contract;
 
+/// 建 `MockRuntime` App 的集成测试每个文件只许一个测试函数（进程级 GTK/tray 初始化会撞）。
+mod mock_runtime_app_isolation;
+
 /// 双击拖动层 / 系统菜单最大化不经过 `window_maximize_toggle`，必须由原生 resize 事件回读并广播。
 #[test]
 fn main_window_native_maximize_is_bridged_to_renderer() {
