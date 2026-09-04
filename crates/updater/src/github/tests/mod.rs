@@ -99,11 +99,11 @@ fn asset_digest_is_optional_and_parses_when_present() {
 #[test]
 fn source_repo_constants_are_the_polaris_and_sagernet_repos() {
     // 更新源仓库是全链路的锚：改错 = 检查更新指向错误的 repo（拉不到或拉到别人的 release）。
-    assert_eq!(APP_UPDATE_REPO, ("2outside", "Polaris"));
+    assert_eq!(APP_UPDATE_REPO, ("polaris-arch", "Polaris"));
     assert_eq!(CORE_UPDATE_REPO, ("SagerNet", "sing-box"));
     assert_eq!(
-        github_releases_api_url("2outside", "Polaris"),
-        "https://api.github.com/repos/2outside/Polaris/releases"
+        github_releases_api_url("polaris-arch", "Polaris"),
+        "https://api.github.com/repos/polaris-arch/Polaris/releases"
     );
     // 便携资产前缀是三处（package.yml 产出 / 本模块选包 / verify-packaging.mjs 断言）
     // 共用的命名契约，改它必须三处同改，故在此钉死字面值。

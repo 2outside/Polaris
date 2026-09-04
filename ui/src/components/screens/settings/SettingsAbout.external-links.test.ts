@@ -12,10 +12,10 @@ describe('SettingsAbout external links have a single navigation owner', () => {
     expect(source.match(/<AboutExternalAction url=/g)).toHaveLength(4);
     expect(source.match(/systemApi\.openExternal\(url\)/g)).toHaveLength(1);
     for (const target of [
-      'https://github.com/2outside/Polaris/releases',
-      'https://github.com/2outside/Polaris/issues',
-      "const LICENSE_URL = 'https://github.com/2outside/Polaris/blob/main/LICENSE'",
-      "const NOTICE_URL = 'https://github.com/2outside/Polaris/blob/main/NOTICE'",
+      'https://github.com/polaris-arch/Polaris/releases',
+      'https://github.com/polaris-arch/Polaris/issues',
+      "const LICENSE_URL = 'https://github.com/polaris-arch/Polaris/blob/main/LICENSE'",
+      "const NOTICE_URL = 'https://github.com/polaris-arch/Polaris/blob/main/NOTICE'",
     ]) {
       expect(source).toContain(target);
     }

@@ -1014,7 +1014,7 @@ fn build_linux_unit(paths: &InstallPaths) -> String {
     format!(
         "[Unit]\n\
 Description=Polaris privileged network helper\n\
-Documentation=https://github.com/2outside/Polaris\n\
+Documentation=https://github.com/polaris-arch/Polaris\n\
 After=network.target\n\
 \n\
 [Service]\n\

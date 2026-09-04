@@ -29,7 +29,7 @@ use crate::version::compare_semver;
 // ── 更新源仓库常量（单点定义，宿主不得自造第二份）────────────────────────────────
 
 /// App 自更新源仓库 `(owner, repo)`（= 上游 `GITHUB_OWNER/GITHUB_REPO` 的 Polaris 对应）。
-pub const APP_UPDATE_REPO: (&str, &str) = ("2outside", "Polaris");
+pub const APP_UPDATE_REPO: (&str, &str) = ("polaris-arch", "Polaris");
 
 /// 内核（sing-box）更新源仓库 `(owner, repo)`（= 上游 `core-downloader.ts` 的 `SagerNet/sing-box`）。
 pub const CORE_UPDATE_REPO: (&str, &str) = ("SagerNet", "sing-box");

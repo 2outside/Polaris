@@ -38,7 +38,7 @@ fn scratch(tag: &str) -> TestDir {
 /// 从文案里去掉 `{owner}/{repo}` ⇒ 第 3 条转红。
 #[test]
 fn github_404_reports_unreachable_repo_not_a_generic_status() {
-    let e = github_status_error(404, "2outside", "Polaris")
+    let e = github_status_error(404, "polaris-arch", "Polaris")
         .expect("404 必须是错误：更新通道整条不通，绝不能伪装成「无更新 / 已是最新」");
     assert!(e.contains("404"), "状态码要留在文案里供日志比对：{e}");
     assert!(
@@ -47,7 +47,7 @@ fn github_404_reports_unreachable_repo_not_a_generic_status() {
              文案必须说准成因而不是甩一个裸状态码：{e}"
     );
     assert!(
-        e.contains("2outside/Polaris"),
+        e.contains("polaris-arch/Polaris"),
         "app 腿与 core 腿共用同一个取数函数，不带 owner/repo 的日志分不清是哪条腿挂了：{e}"
     );
 }
@@ -88,12 +88,12 @@ fn github_status_error_truth_table() {
 fn releases_url_for_version_targets_tag_page() {
     assert_eq!(
         releases_url_for(Some("v0.2.0")),
-        "https://github.com/2outside/Polaris/releases/tag/v0.2.0"
+        "https://github.com/polaris-arch/Polaris/releases/tag/v0.2.0"
     );
     // 调用方将来若改传裸 semver（无 `v`），也不能拼错——两种输入形态幂等。
     assert_eq!(
         releases_url_for(Some("0.2.0")),
-        "https://github.com/2outside/Polaris/releases/tag/v0.2.0"
+        "https://github.com/polaris-arch/Polaris/releases/tag/v0.2.0"
     );
 }
 
@@ -105,15 +105,15 @@ fn releases_url_for_version_targets_tag_page() {
 fn releases_url_for_missing_version_falls_back_to_list_page() {
     assert_eq!(
         releases_url_for(None),
-        "https://github.com/2outside/Polaris/releases"
+        "https://github.com/polaris-arch/Polaris/releases"
     );
     assert_eq!(
         releases_url_for(Some("")),
-        "https://github.com/2outside/Polaris/releases"
+        "https://github.com/polaris-arch/Polaris/releases"
     );
     assert_eq!(
         releases_url_for(Some("   ")),
-        "https://github.com/2outside/Polaris/releases"
+        "https://github.com/polaris-arch/Polaris/releases"
     );
 }
 

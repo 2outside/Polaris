@@ -64,8 +64,8 @@ const VERDICT_META = {
 } as const;
 
 /** 仓库根的 LICENSE（MIT，Polaris 本体）与 NOTICE（第三方组件及其许可）。 */
-const LICENSE_URL = 'https://github.com/2outside/Polaris/blob/main/LICENSE';
-const NOTICE_URL = 'https://github.com/2outside/Polaris/blob/main/NOTICE';
+const LICENSE_URL = 'https://github.com/polaris-arch/Polaris/blob/main/LICENSE';
+const NOTICE_URL = 'https://github.com/polaris-arch/Polaris/blob/main/NOTICE';
 
 /**
  * 关于页外链的唯一打开入口。
@@ -175,13 +175,13 @@ export default function SettingsAbout() {
         <p className="about-desc">{t('settings.about.intro')}</p>
 
         <div className="about-links">
-          <AboutExternalAction url="https://github.com/2outside/Polaris/releases">
+          <AboutExternalAction url="https://github.com/polaris-arch/Polaris/releases">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
               <path d="M12 3v11M8 10l4 4 4-4M4 19h16" />
             </svg>
             <span>{t('settings.about.releases')}</span>
           </AboutExternalAction>
-          <AboutExternalAction url="https://github.com/2outside/Polaris/issues">
+          <AboutExternalAction url="https://github.com/polaris-arch/Polaris/issues">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
               <circle cx="12" cy="12" r="9" />
               <path d="M12 8v5M12 16h.01" />

@@ -9,7 +9,7 @@ version = "1.0.0"
 edition = "2021"
 license = "MIT"
 authors = ["Outsider"]
-repository = "https://github.com/2outside/Polaris"
+repository = "https://github.com/polaris-arch/Polaris"
 
 # 集中声明：serde/serde_json 是 Rust JSON 序列化事实标准（无 stdlib 替代），config-engine 核心职责即产/消费
 # sing-box JSON config（sing-box check 输入）；src-tauri 主进程已用（既有依赖，非新增第三方）。

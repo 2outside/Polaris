@@ -470,7 +470,7 @@ fn exit_after_detached_update(app: &AppHandle) {
 ///
 /// ✅ **检查侧已接线**：经 `runtime/http.rs` 的真实 client（`state.http()`）走**同一条**
 /// SSRF 安全路径 [`safe_redirect_fetch`](polaris_net_stack::safe_redirect::safe_redirect_fetch)（首 URL + 每跳 Location 都过 `assert_host_allowed`）拉
-/// `2outside/Polaris` 的 releases → `polaris_updater::check_app_update` 纯逻辑转换（过滤 prerelease /
+/// `polaris-arch/Polaris` 的 releases → `polaris_updater::check_app_update` 纯逻辑转换（过滤 prerelease /
 /// 按 `published_at` 挑最新 / `compare_semver` 判新 / 平台架构资产选择 / skip 判定）→ 返
 /// `{ hasUpdate, updateInfo? }`（`updateInfo` 字段与前端 `UpdateInfo` 契约逐字对齐）。
 ///
@@ -1560,7 +1560,7 @@ pub fn update_skip(state: State<'_, AppRuntime>, version: Option<String>) -> Api
 }
 
 /// 泛 releases 列表页（无版本号可用时的回落目标）。
-pub(super) const RELEASES_LIST_URL: &str = "https://github.com/2outside/Polaris/releases";
+pub(super) const RELEASES_LIST_URL: &str = "https://github.com/polaris-arch/Polaris/releases";
 
 /// 拼「查看更新日志」目标 URL（纯函数，可测）：有版本号 → 直达该版本 release 页；否则回落泛列表页。
 ///
