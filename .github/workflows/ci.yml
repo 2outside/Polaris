@@ -9,7 +9,8 @@ name: CI
 #   · push main（调试热路径）：只跑 ubuntu-22.04 单腿 —— 最便宜、最快反馈；
 #   · pull_request / workflow_dispatch / 被 package.yml workflow_call（发布）：完整 3-OS 矩阵；
 #   · 发布质量不降级：tag 发布经 package.yml 的 `ci` gate job 调回本 workflow 跑满 3-OS，
-#     CI 不绿不打包（见 package.yml jobs.ci）。
+#     CI 不绿不发布（见 package.yml jobs.release）。2026-09-04 起打包腿与本门**并行**开跑：
+#     门拦的是 release job，不是 package job —— 门红时安装包会被构建出来但发不出去。
 # main 应开 ruleset，把三平台本 job、UI 与 release risk gate 设为 required checks。
 on:
   push:
@@ -50,7 +51,7 @@ on:
           - ubuntu-22.04
           - windows-2022
           - macos-14
-  # 供 package.yml 复用作发布前置门（先过检测再打包），零重复定义。
+  # 供 package.yml 复用作发布前置门（与打包并行跑，门不绿则 release job 不起），零重复定义。
   workflow_call:
 
 # 同一 ref 上新跑取消在途旧跑。

@@ -223,7 +223,7 @@ jobs:
             echo "full=$full"
           } >> "$GITHUB_OUTPUT"
 
-  # ══ 发布前置门：先过检测再打包 ══
+  # ══ 发布前置门：与打包并行跑，门不绿则不发布 ══
   # 复用 ci.yml（workflow_call）跑**完整 3-OS** fmt+clippy+build+test，CI 不绿则 4 平台打包
   # 一个都不起（needs 链）。
   # [选 workflow_call：单一定义零重复、gate 跑在发布 commit 本体上、release/dispatch/tag 三种
@@ -258,23 +258,22 @@ jobs:
 
   package:
     name: build installer (${{ matrix.label }})
-    needs: [setup, ci, ui]
-    # 🔴 `always()` 是**必需的**，不是保险：上面两门在单平台 dispatch 时是 `skipped`，
-    # 而默认的 needs 语义把 skipped 也当作「未满足」⇒ package 会跟着被整个跳过。
+    # 2026-09-04：打包腿由「串在两门之后」改为「与两门并行」。此前不并行的唯一理由是额度——
+    # 门红时四条腿白跑，其中两条 mac 按 10x 计费；本仓是 PUBLIC + 标准 runner，Actions 额度为 0，
+    # 该理由不成立。换回的是发布关键路径少一整个 gate 时长（冷跑实测 32.9 → 21.8 min）。
     #
-    # 质量门只放行 success / skipped：success = 全量发布门真跑且绿，skipped = 单平台 dispatch
-    # 按设计复用调用侧门禁。必须用 allowlist，不能写 `!= 'failure'` —— cancelled（手动取消、
-    # 并发顶替、超时收尾）也满足“不等于 failure”，会在门未完成时错误启动四条打包腿。
-    # setup 那条只允许 success：矩阵解析失败/取消时没有任何可信目标可打。
+    # 🔴 质量门没有被删，是**下移到 release job**：同一套 allowlist 判据原样搬过去，语义由
+    #    「未过门不许构建」变成「未过门不许发布」。改这里之前先读 release job 的 if 与其注释。
     #
-    # ⚠️ 改这三条判据前先想清楚发布路径：tag push ⇒ full=true ⇒ 两门真的跑 ⇒ 失败时
-    # result=='failure' ⇒ 本 job 不起。cancelled 同样必须拦；把 allowlist 放宽或删掉，等于让
-    # CI 未完成也能出安装包。
-    if: >-
-      always()
-      && needs.setup.result == 'success'
-      && (needs.ci.result == 'success' || needs.ci.result == 'skipped')
-      && (needs.ui.result == 'success' || needs.ui.result == 'skipped')
+    # ⚠️ 并行引入的新事实，如实记：门红时这四条腿照跑、照传 artifact ⇒ **会存在一批未过门的
+    #    artifact**。它们进不了 release（release 的 allowlist 拦住），且所在 run 整体是红的；
+    #    但若有人直接从红 run 里下载 artifact，拿到的就是未经门验的包。这是并行拓扑的固有代价，
+    #    在 package job 内无法消除：要读 ci/ui 的 result 就必须把它们写进 needs，而 needs 即等待。
+    #
+    # setup 只允许 success：矩阵解析失败/取消时没有任何可信目标可打。此处不需要 `always()`——
+    # needs 里只剩 setup，默认语义已经等价。
+    needs: [setup]
+    if: needs.setup.result == 'success'
     # W24：helper 与 app 分两次 cargo build，但必须共享同一份构建身份。放 job 级而非某一步，
     # 让 helper staging 与后面的 tauri-action 都继承当前 checkout commit；同 protocol 的旧 helper
     # 才能被新 app 识别为 upgradeable。github.sha 在 tag/dispatch 两条出包路径都指向被检出的 commit。
@@ -1191,9 +1190,12 @@ jobs:
   # ② 对**同一 tag 重跑 workflow**（第二个写入者来自时间维度）：先 `gh release view` 探在否，
   #    已存在只传资产、不重建；`gh release upload --clobber` 覆盖同名资产而非追加 `.1` 后缀。
   #    故重跑收敛到同一状态。
-  # ③ `needs` 默认要求 package 的**每条腿全部成功**：缺一条（比如 macos-x64 挂了）则本 job 跳过，
+  # ③ 要求 package 的**每条腿全部成功**：缺一条（比如 macos-x64 挂了）则本 job 跳过，
   #    绝不发布只有单架构 dmg 的残缺 release —— 与 github.rs 取消跨架构回落是同一条纪律的两端
   #    （那边保证「宁可不更新」，这边保证「压根不会出现半套 release」）。
+  #    🔴 2026-09-04 起这条**靠显式判据 `needs.package.result == 'success'` 成立，不再靠默认语义**：
+  #    本 job 的 if 加了 `always()`（理由见下），而 always() 恰恰关掉了「needs 全绿才跑」这条隐含
+  #    要求。matrix job 的 result 是全腿汇总值，缺一腿失败即非 success，故纪律逐字保留。
   # ④ 但 ③ 只管「起跑的腿都成功」，管不了「起跑了几条腿」——2026-07-31 加 workflow_dispatch 的
   #    platform 输入后，这正好是个新缺口：选 platform=windows ⇒ 矩阵只剩一条腿 ⇒ 那条腿成功 ⇒
   #    `needs: package` 满足 ⇒ 若只有 ③ 把关，release 照发，产出一个**只有 win 安装包**的 release。
@@ -1208,15 +1210,32 @@ jobs:
     name: publish release
     # setup 进 needs 只为读它的 outputs（`needs` 上下文只含 needs 里列出的 job）；
     # setup 与 ci/ui 并行、ubuntu 1x，不加长关键路径。
-    needs: [setup, package]
-    # 两条闸门，缺一不可：
+    #
+    # 2026-09-04：ci / ui 由 package 的 needs 移到这里 —— 打包与门并行开跑，**发布仍必须等门**。
+    needs: [setup, ci, ui, package]
+    # 五条闸门，缺一不可：
+    #   · `always()` —— **必需的，不是保险**：两门在单平台 dispatch、以及 release-risk.yml 以
+    #     `skip_quality_gates: true` 复用本 workflow 时都是 `skipped`，而默认 needs 语义把 skipped
+    #     当作「未满足」⇒ 本 job 会被整个跳过，等于该发的 release 不发。
+    #   · `needs.package.result == 'success'` —— 见上面 ③：always() 关掉了默认的「needs 全绿」，
+    #     必须显式写回，否则打包腿挂了也照发。
+    #   · 两门的 allowlist，只放行 success / skipped：success = 全量发布门真跑且绿，
+    #     skipped = 按设计复用调用侧门禁。必须用 allowlist，**不能写 `!= 'failure'`** ——
+    #     cancelled（手动取消、并发顶替、超时收尾）也满足「不等于 failure」，会在门尚未完成时
+    #     就把包发出去。这正是本判据从 package job 搬过来时逐字保留的原因。
     #   · `startsWith(github.ref, 'refs/tags/v')` —— 只有 v* tag 才发布：本 workflow 也可在分支 ref 上
     #     workflow_dispatch（手动验打包链），那种 ref 的 ref_name 是分支名（main），建出来的 release
     #     名字是错的。在 tag ref 上 dispatch 则 ref 就是 tag ref，本条为真，幂等补资产路径成立。
     #   · `needs.setup.outputs.full == 'true'` —— 见上面 ④：只有全平台都构建了才准发布。
     # `github.ref` 与 `needs` 在 **job 级** 都可用（不同于 matrix 级——见 package job 搬走的那段
     # github.workspace 教训：那是上下文**求值时机**问题，不是名字拼错）。
-    if: startsWith(github.ref, 'refs/tags/v') && needs.setup.outputs.full == 'true'
+    if: >-
+      always()
+      && startsWith(github.ref, 'refs/tags/v')
+      && needs.setup.outputs.full == 'true'
+      && needs.package.result == 'success'
+      && (needs.ci.result == 'success' || needs.ci.result == 'skipped')
+      && (needs.ui.result == 'success' || needs.ui.result == 'skipped')
     runs-on: ubuntu-22.04
     permissions:
       contents: write

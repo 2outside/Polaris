@@ -32,7 +32,8 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
-  # 供 package.yml 复用作发布前置门：CI 绿但前端红也不许打包。
+  # 供 package.yml 复用作发布前置门：CI 绿但前端红也不许**发布**。
+  # （2026-09-04 起本门与打包腿并行；判据挂在 package.yml 的 release job 上，不在 package job 上。）
   workflow_call:
 
 # 判据与 ci.yml 一致：调用方名称进入并发组，独立 UI 与 Package 内复用门互不取消；
